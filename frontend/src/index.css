@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 30% 97%;
+    --foreground: 224 40% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 224 40% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 40% 12%;
+    --primary: 243 75% 56%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 222 30% 94%;
+    --secondary-foreground: 224 40% 16%;
+    --muted: 222 30% 94%;
+    --muted-foreground: 220 12% 42%;
+    --accent: 243 80% 96%;
+    --accent-foreground: 243 60% 40%;
+    --destructive: 350 78% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 158 78% 30%;
+    --success-foreground: 0 0% 100%;
+    --warning: 32 92% 42%;
+    --warning-foreground: 0 0% 100%;
+    --border: 222 24% 89%;
+    --input: 222 24% 88%;
+    --ring: 243 75% 56%;
+    --radius: 0.75rem;
+    --sidebar: 232 47% 9%;
+    --shadow-color: 232 40% 20%;
+  }
+
+  .dark {
+    --background: 232 40% 6%;
+    --foreground: 220 25% 93%;
+    --card: 232 34% 10%;
+    --card-foreground: 220 25% 93%;
+    --popover: 232 34% 10%;
+    --popover-foreground: 220 25% 93%;
+    --primary: 243 90% 72%;
+    --primary-foreground: 232 47% 9%;
+    --secondary: 232 26% 16%;
+    --secondary-foreground: 220 25% 93%;
+    --muted: 232 26% 15%;
+    --muted-foreground: 224 14% 62%;
+    --accent: 243 40% 20%;
+    --accent-foreground: 243 90% 84%;
+    --destructive: 350 84% 66%;
+    --destructive-foreground: 232 47% 9%;
+    --success: 158 64% 52%;
+    --success-foreground: 232 47% 9%;
+    --warning: 38 92% 58%;
+    --warning-foreground: 232 47% 9%;
+    --border: 232 24% 18%;
+    --input: 232 24% 20%;
+    --ring: 243 90% 72%;
+    --sidebar: 232 50% 5%;
+    --shadow-color: 232 60% 2%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / .5); background-clip: content-box; border: 2px solid transparent; }
+}
+
+@layer components {
+  /* soft ambient glow behind the app, gives the glass cards something to sit on */
+  .app-bg {
+    background:
+      radial-gradient(1100px 500px at 8% -10%, hsl(243 90% 65% / .10), transparent 60%),
+      radial-gradient(900px 480px at 100% 0%, hsl(190 90% 50% / .08), transparent 55%),
+      hsl(var(--background));
+  }
+  .surface {
+    @apply rounded-2xl border bg-card/90 backdrop-blur-sm;
+    box-shadow: 0 1px 2px hsl(var(--shadow-color) / .04), 0 8px 24px -12px hsl(var(--shadow-color) / .12);
+  }
+  .fade-in { animation: fade-in .28s ease-out both; }
+  .fade-in-pop { animation: fade-in-pop .16s cubic-bezier(.2,.8,.3,1.2) both; }
+  .page-enter { animation: page-enter .22s ease-out both; }
+  .num { font-variant-numeric: tabular-nums; }
+  .table-scroll { @apply overflow-auto rounded-xl border; }
+  .skeleton {
+    @apply animate-pulse rounded-md bg-muted;
+    background-image: linear-gradient(90deg, hsl(var(--muted)) 0%, hsl(var(--border)) 50%, hsl(var(--muted)) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+  .nav-rail-icon { @apply flex h-10 w-10 items-center justify-center rounded-lg; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade-in-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Respect reduced-motion preference — purely additive, costs nothing when animations are already off */
+@media (prefers-reduced-motion: reduce) {
+  .fade-in, .fade-in-pop, .page-enter, .skeleton { animation: none !important; }
+}

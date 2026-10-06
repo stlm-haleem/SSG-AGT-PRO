@@ -1,0 +1,42 @@
+# ---------- Secrets & credentials (never commit) ----------
+.env
+.env.*
+*.pem
+*.key
+backend/data/.secret
+backend/data/integrations.json
+backend/data/integrations/*
+!backend/data/integrations/.keep
+
+# ---------- Runtime data (business data, uploads, exports, DB) ----------
+backend/ssg_agt.db
+backend/*.db
+backend/*.sqlite*
+backend/data/uploads/
+backend/data/exports/
+backend/data/*.csv
+backend/data/.perm_migrations.json
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# ---------- Node / frontend ----------
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+.vite/
+
+# ---------- Editors / OS ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
