@@ -321,16 +321,41 @@ def _overview_type_perm(slug: str):
     return typ, F.OVERVIEW_PERMS[typ]
 
 
+# Extra multi-select filters shared by every Account Overview tab (applied on top of the supervisor's
+# own filtering, so his threshold / limit / discrepancy calculations are untouched).
+OVERVIEW_EXTRA = {"f_code": "CODE", "f_wallet": "WALLET", "f_limit_status": "LIMIT STATUS",
+                  "f_acct_type": "ACCT TYPE", "f_tags": "TAGS", "f_status": "STATUS", "f_whrs": "W. HRS"}
+
+
+def _apply_overview_extras(part: pd.DataFrame, extras: dict) -> pd.DataFrame:
+    if part is None or part.empty:
+        return part
+    for param, col in OVERVIEW_EXTRA.items():
+        vals = [str(v).strip().casefold() for v in (extras.get(param) or []) if str(v).strip()]
+        if vals and col in part.columns:
+            part = part[part[col].astype(str).str.strip().str.casefold().isin(vals)]
+    return part
+
+
 @router.get("/overview/{slug}")
 def account_overview(slug: str, threshold: str = "", code: str = "", acct_type: str = "", wallet: str = "",
                      category: str = "ALL", q: str = "", limit_type: str = "ALL",
                      status: list[str] = Query(default=[]), status_code: list[str] = Query(default=[]),
+                     f_code: list[str] = Query(default=[]), f_wallet: list[str] = Query(default=[]),
+                     f_limit_status: list[str] = Query(default=[]), f_acct_type: list[str] = Query(default=[]),
+                     f_tags: list[str] = Query(default=[]), f_status: list[str] = Query(default=[]),
+                     f_whrs: list[str] = Query(default=[]),
                      sort_rbal: str = "", page: int = 1, per_page: int = 25,
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     typ, key = _overview_type_perm(slug)
     _require(user, db, key)
     df = _monitoring_frame()
+    # the options come from this tab's own population (tab rule + threshold), before the extra filters
+    base = F.filter_overview_dataframe(df, slug, threshold, code, acct_type, wallet, category, "", limit_type, status, status_code, "")
+    extras = {"f_code": f_code, "f_wallet": f_wallet, "f_limit_status": f_limit_status, "f_acct_type": f_acct_type,
+              "f_tags": f_tags, "f_status": f_status, "f_whrs": f_whrs}
     part = F.filter_overview_dataframe(df, slug, threshold, code, acct_type, wallet, category, q, limit_type, status, status_code, sort_rbal)
+    part = _apply_overview_extras(part, extras)
     page_df, meta = paginate(part, page, per_page)
     tbl = pack(page_df[MONITOR_COLUMNS] if page_df is not None and not page_df.empty else page_df)
     if not tbl["columns"]:
@@ -340,8 +365,10 @@ def account_overview(slug: str, threshold: str = "", code: str = "", acct_type: 
     return {
         **tbl, **meta, "type": typ, "heading": heading,
         "needs_threshold": typ in ("Agent Accounts", "Personal Accounts", "High Discrepancy"),
-        "options": {"code": options_of(df, "CODE"), "acct_type": options_of(df, "ACCT TYPE"),
-                    "wallet": options_of(df, "WALLET"), "status": options_of(df, "STATUS")},
+        "options": {"code": options_of(base, "CODE"), "acct_type": options_of(base, "ACCT TYPE"),
+                    "wallet": options_of(base, "WALLET"), "status": options_of(base, "STATUS"),
+                    "limit_status": options_of(base, "LIMIT STATUS"), "tags": options_of(base, "TAGS"),
+                    "whrs": options_of(base, "W. HRS")},
     }
 
 
@@ -349,11 +376,17 @@ def account_overview(slug: str, threshold: str = "", code: str = "", acct_type: 
 def export_overview(slug: str, threshold: str = "", code: str = "", acct_type: str = "", wallet: str = "",
                     category: str = "ALL", q: str = "", limit_type: str = "ALL",
                     status: list[str] = Query(default=[]), status_code: list[str] = Query(default=[]),
+                    f_code: list[str] = Query(default=[]), f_wallet: list[str] = Query(default=[]),
+                    f_limit_status: list[str] = Query(default=[]), f_acct_type: list[str] = Query(default=[]),
+                    f_tags: list[str] = Query(default=[]), f_status: list[str] = Query(default=[]),
+                    f_whrs: list[str] = Query(default=[]),
                     sort_rbal: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     typ, key = _overview_type_perm(slug)
     _require(user, db, key)
     part = F.filter_overview_dataframe(_monitoring_frame(), slug, threshold, code, acct_type, wallet, category, q,
                                        limit_type, status, status_code, sort_rbal)
+    part = _apply_overview_extras(part, {"f_code": f_code, "f_wallet": f_wallet, "f_limit_status": f_limit_status,
+                                         "f_acct_type": f_acct_type, "f_tags": f_tags, "f_status": f_status, "f_whrs": f_whrs})
     return export_xlsx(part, f"overview_{slug}")
 
 
@@ -716,10 +749,156 @@ def pending_update(p: WalletIn, user: User = Depends(perm("pending", "pending_ed
     return {"message": f"{p.walletname.upper()} confirmed as {p.wallet.upper()} from Wallet Master List."}
 
 
+# ---- Deleted accounts: every Pending record that is deleted is archived here -----------------------
+# The supervisor's logic only records a DELETED decision (and removes the row from the Master List).
+# We additionally snapshot the Master List row, who deleted it and when, so the Deleted tab can show it.
+DELETED_STORE = DATA_DIR / "deleted_accounts.csv"
+DELETED_COLUMNS = ["WALLETNAME", "WALLET", "ACCOUNT TYPE", "GROUP CODE", "HOURS", "METHOD",
+                   "MRC DP LIMIT", "SDP PAID", "DELETED AT", "DELETED BY"]
+
+
+def _load_deleted() -> pd.DataFrame:
+    if not DELETED_STORE.exists():
+        return pd.DataFrame(columns=DELETED_COLUMNS)
+    try:
+        df = pd.read_csv(DELETED_STORE, dtype=str, keep_default_na=False)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=DELETED_COLUMNS)
+    for c in DELETED_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    return df[DELETED_COLUMNS]
+
+
+def _archive_deleted(master_rows: pd.DataFrame, username: str) -> None:
+    """Append snapshots of just-deleted Master List rows to the Deleted store."""
+    if master_rows is None or master_rows.empty:
+        return
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    add = pd.DataFrame({c: master_rows[c].astype(str).str.strip() if c in master_rows.columns else "" for c in DELETED_COLUMNS[:-2]})
+    add["DELETED AT"], add["DELETED BY"] = stamp, username
+    cur = _load_deleted()
+    out = pd.concat([cur, add], ignore_index=True)
+    out["_k"] = out["WALLETNAME"].astype(str).str.strip().str.upper()
+    out = out[out["_k"].ne("")].drop_duplicates("_k", keep="last").drop(columns=["_k"])
+    out.to_csv(DELETED_STORE, index=False, encoding="utf-8-sig")
+
+
+def _deleted_frame() -> pd.DataFrame:
+    """Archived rows that are still DELETED in the pending decisions, plus any older DELETED decision that
+    pre-dates the archive (those only have the wallet name)."""
+    dec = DATA.pending_decisions
+    names = set(dec.loc[dec["DECISION"].eq("DELETED"), "WALLETNAME"].astype(str).str.upper()) if dec is not None and not dec.empty else set()
+    snap = _load_deleted()
+    snap = snap[snap["WALLETNAME"].astype(str).str.upper().isin(names)].copy()
+    missing = sorted(names - set(snap["WALLETNAME"].astype(str).str.upper()))
+    if missing:
+        snap = pd.concat([snap, pd.DataFrame([{**{c: "" for c in DELETED_COLUMNS}, "WALLETNAME": n} for n in missing])], ignore_index=True)
+    return snap.sort_values("WALLETNAME", kind="stable").reset_index(drop=True) if not snap.empty else snap
+
+
+def _deleted_filtered(q, wallet, acct_type, group_code, method, df=None):
+    df = _deleted_frame() if df is None else df
+    for field, vals in [("WALLET", wallet), ("ACCOUNT TYPE", acct_type), ("GROUP CODE", group_code), ("METHOD", method)]:
+        df = _in_filter(df, field, vals)
+    return _contains_any(df, q)
+
+
+@router.get("/deleted")
+def deleted_list(q: str = "", wallet: list[str] = Query(default=[]), acct_type: list[str] = Query(default=[]),
+                 group_code: list[str] = Query(default=[]), method: list[str] = Query(default=[]),
+                 page: int = 1, per_page: int = 25, user: User = Depends(perm("deleted"))):
+    raw = _deleted_frame()
+    df = _deleted_filtered(q, wallet, acct_type, group_code, method, raw)
+    page_df, meta = paginate(df, page, per_page)
+    return {**pack(page_df, ["MRC DP LIMIT", "SDP PAID"]), **meta,
+            "options": {"wallet": options_of(raw, "WALLET"), "acct_type": options_of(raw, "ACCOUNT TYPE"),
+                        "group_code": options_of(raw, "GROUP CODE"), "method": options_of(raw, "METHOD")}}
+
+
+@router.get("/export/deleted")
+def export_deleted(q: str = "", wallet: list[str] = Query(default=[]), acct_type: list[str] = Query(default=[]),
+                   group_code: list[str] = Query(default=[]), method: list[str] = Query(default=[]),
+                   user: User = Depends(perm("deleted"))):
+    return export_xlsx(_deleted_filtered(q, wallet, acct_type, group_code, method), "Deleted_Accounts")
+
+
+class RestoreIn(BaseModel):
+    walletnames: list[str] = []
+
+
+@router.post("/deleted/restore")
+def deleted_restore(p: RestoreIn, user: User = Depends(perm("deleted", "deleted_restore"))):
+    """Put deleted accounts back into the Master List (with the details they had when deleted) and clear
+    their DELETED decision, so they are treated like any other Master List account again -- if one is still
+    absent from the current imports it will simply show up in Pending Accounts again."""
+    names = {str(n).strip().upper() for n in p.walletnames if str(n).strip()}
+    if not names:
+        raise HTTPException(400, "Select at least one deleted account.")
+    snap = _load_deleted()
+    snap = snap[snap["WALLETNAME"].astype(str).str.strip().str.upper().isin(names)]
+    master = _master_df()
+    if master.empty:
+        master = pd.DataFrame(columns=AppData.MASTER_COLUMNS)
+    for c in AppData.MASTER_COLUMNS:
+        if c not in master.columns:
+            master[c] = ""
+    present = set(master["WALLETNAME"].astype(str).str.strip().str.upper())
+    restored = 0
+    rows = []
+    for name in sorted(names):
+        if name in present:
+            continue
+        rec = {c: "" for c in AppData.MASTER_COLUMNS}
+        rec["WALLETNAME"] = name
+        hit = snap[snap["WALLETNAME"].astype(str).str.strip().str.upper().eq(name)]
+        if not hit.empty:
+            for c in AppData.MASTER_COLUMNS:
+                if c in hit.columns and c != "WALLETNAME":
+                    rec[c] = str(hit.iloc[-1][c]).strip()
+        rows.append(rec)
+        restored += 1
+    if rows:
+        master = pd.concat([master, pd.DataFrame(rows)], ignore_index=True)
+        DATA.save_master(AppData._normalise_master(master))
+    # clear the DELETED decision (the supervisor's logic then treats the account as a normal Master List account)
+    dec = DATA.pending_decisions.copy()
+    if dec is not None and not dec.empty:
+        DATA.save_pending_decisions(dec[~dec["WALLETNAME"].astype(str).str.upper().isin(names)].copy())
+    # drop the archive entries
+    cur = _load_deleted()
+    cur[~cur["WALLETNAME"].astype(str).str.strip().str.upper().isin(names)].to_csv(DELETED_STORE, index=False, encoding="utf-8-sig")
+    try:
+        LOGIC.sync_master_from_imports()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"message": f"{len(names)} account(s) restored to the Wallet Master List."
+                       + (" Accounts missing from the current imports will appear in Pending Accounts again." if restored else "")}
+
+
+@router.post("/deleted/remove")
+def deleted_remove(p: RestoreIn, user: User = Depends(perm("deleted", "deleted_delete"))):
+    """Remove accounts from the Deleted list without touching the Master List. An account stays in Deleted
+    until it is restored or removed here -- re-adding it to the Master List does not drop it."""
+    names = {str(n).strip().upper() for n in p.walletnames if str(n).strip()}
+    if not names:
+        raise HTTPException(400, "Select at least one deleted account.")
+    dec = DATA.pending_decisions.copy()
+    if dec is not None and not dec.empty:
+        DATA.save_pending_decisions(dec[~dec["WALLETNAME"].astype(str).str.upper().isin(names)].copy())
+    cur = _load_deleted()
+    cur[~cur["WALLETNAME"].astype(str).str.strip().str.upper().isin(names)].to_csv(DELETED_STORE, index=False, encoding="utf-8-sig")
+    return {"message": f"{len(names)} account(s) removed from the Deleted list."}
+
+
 @router.post("/pending/delete")
 def pending_delete(p: WalletIn, user: User = Depends(perm("pending", "pending_delete"))):
+    name = p.walletname.strip().upper()
+    master = _master_df()
+    snap = master[master["WALLETNAME"].astype(str).str.strip().str.upper().eq(name)].copy() if not master.empty else master
     if not LOGIC.pending_delete_account(p.walletname):
         raise HTTPException(400, "Nothing to delete.")
+    _archive_deleted(snap, user.username)
     return {"message": f"{p.walletname.upper()} marked as Deleted and removed from Wallet Master List."}
 
 
@@ -740,6 +919,7 @@ def pending_delete_all(p: BulkIn, user: User = Depends(perm("pending", "pending_
         return {"message": "No Pending Accounts to mark as Deleted."}
     names = [str(x).strip().upper() for x in df["WALLETNAME"].tolist() if str(x).strip()]
     master = _master_df()
+    _archive_deleted(master[master["WALLETNAME"].astype(str).str.upper().isin(names)].copy(), user.username)
     DATA.save_master(master[~master["WALLETNAME"].astype(str).str.upper().isin(names)].copy())
     add = pd.DataFrame([{"WALLETNAME": n, "DECISION": "DELETED", "WALLET": ""} for n in names])
     DATA.save_pending_decisions(pd.concat([DATA.pending_decisions.copy(), add], ignore_index=True))

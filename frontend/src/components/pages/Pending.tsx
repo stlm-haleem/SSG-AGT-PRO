@@ -95,7 +95,7 @@ export function Pending({ token, can }: { token: string; can: (k: string) => boo
         )}
       </div>
       <Confirm open={confirmBulkDelete} title="Delete all filtered pending accounts?" danger confirmLabel="Delete all"
-        description="Removes them from the Masterlist and marks them Deleted." onConfirm={deleteAll} onClose={() => setConfirmBulkDelete(false)} />
+        description="Removes them from the Masterlist and moves them to the Deleted tab." onConfirm={deleteAll} onClose={() => setConfirmBulkDelete(false)} />
     </div>
   );
 }

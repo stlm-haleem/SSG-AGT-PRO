@@ -107,15 +107,23 @@ def seed_roles(db: Session) -> None:
     db.commit()
 
 
-# Permission keys introduced by the SSG AGT V1.84 sync. Existing databases keep the roles
-# exactly as the admin edited them, so these new keys are added ONCE to the built-in roles
+# Permission keys introduced after the first release. Existing databases keep the roles exactly as
+# the admin edited them, so each batch of new keys is added ONCE to the built-in roles
 # (never to custom roles -- tick them in Admin -> Roles & Permissions) and never again.
-_NEW_KEY_GRANTS = {
-    "OPERATION": ["dashboard_generate", "monitoring_permanent_stop", "imports_google_sync", "imports_telegram_reports"],
-    "User": ["dashboard_generate", "monitoring_permanent_stop", "imports_google_sync", "imports_telegram_reports"],
-    "Viewer": ["monitoring_permanent_stop"],
+_MIGRATIONS = {
+    "ssg_v1_84_permission_keys": {
+        "OPERATION": ["dashboard_generate", "monitoring_permanent_stop", "imports_google_sync", "imports_telegram_reports"],
+        "User": ["dashboard_generate", "monitoring_permanent_stop", "imports_google_sync", "imports_telegram_reports"],
+        "Viewer": ["monitoring_permanent_stop"],
+    },
+    # Masterlist -> Deleted tab
+    "deleted_tab_permission": {
+        "OPERATION": ["deleted"], "User": ["deleted"], "Viewer": ["deleted"],
+    },
+    "deleted_restore_permission": {
+        "OPERATION": ["deleted_restore"], "User": ["deleted_restore"],
+    },
 }
-_MIGRATION_ID = "ssg_v1_84_permission_keys"
 
 
 def migrate_new_permissions(db: Session) -> None:
@@ -124,22 +132,26 @@ def migrate_new_permissions(db: Session) -> None:
         done = set(json.loads(marker.read_text())) if marker.exists() else set()
     except ValueError:
         done = set()
-    if _MIGRATION_ID in done:
-        return
-    for role in db.query(Role).all():
-        grants = next((v for k, v in _NEW_KEY_GRANTS.items() if k.lower() == role.name.strip().lower()), None)
-        if not grants:
+    changed = False
+    for mig_id, grants_by_role in _MIGRATIONS.items():
+        if mig_id in done:
             continue
-        try:
-            current = json.loads(role.permissions or "[]")
-        except ValueError:
-            current = []
-        merged = list(dict.fromkeys(list(current) + grants))
-        if merged != current:
-            role.permissions = json.dumps(merged)
-    db.commit()
-    done.add(_MIGRATION_ID)
-    marker.write_text(json.dumps(sorted(done)))
+        for role in db.query(Role).all():
+            grants = next((v for k, v in grants_by_role.items() if k.lower() == role.name.strip().lower()), None)
+            if not grants:
+                continue
+            try:
+                current = json.loads(role.permissions or "[]")
+            except ValueError:
+                current = []
+            merged = list(dict.fromkeys(list(current) + grants))
+            if merged != current:
+                role.permissions = json.dumps(merged)
+        done.add(mig_id)
+        changed = True
+    if changed:
+        db.commit()
+        marker.write_text(json.dumps(sorted(done)))
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

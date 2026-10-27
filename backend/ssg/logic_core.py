@@ -1359,7 +1359,8 @@ class BusinessLogic:
         return pd.DataFrame([total], columns=df.columns)
 
     def _cih_wallet_table(self, personal=False):
-        cache_key = 'cih_personal' if personal else 'cih_agent'
+        # includes the Generate-Summary revision: this table reads merchant_deposit_result / merchant_payout_result
+        cache_key = f"{'cih_personal' if personal else 'cih_agent'}:{self.data.summary_revision}"
         cached = self._cached(cache_key)
         if cached is not None:
             return cached.copy()
@@ -1676,7 +1677,10 @@ class BusinessLogic:
         The CIH Limit Availability totals are the source for the headline LIMIT
         values, while Deposit Type Summary is the source for DEPOSIT.
         """
-        cached = self._cached("dashboard_limit_utilization")
+        # includes the Generate-Summary revision: the DEPOSIT column reads deposit_type_result, so a cached
+        # result built before Generate Summary must not be reused afterwards
+        cache_key = f"dashboard_limit_utilization:{self.data.summary_revision}"
+        cached = self._cached(cache_key)
         if cached is not None:
             return {k: v.copy() for k, v in cached.items()}
         availability = self.cih_limit_availability()
@@ -1822,7 +1826,7 @@ class BusinessLogic:
             "personal_ebanking": append_total(personal_eb),
             "personal_ibanking": append_total(personal_ib),
         }
-        return self._store_cache("dashboard_limit_utilization", result)
+        return self._store_cache(cache_key, result)
 
     # ========================================================
     # MAIN SUMMARY

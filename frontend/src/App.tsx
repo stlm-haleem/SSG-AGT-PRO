@@ -14,6 +14,7 @@ import { AccountsStatus } from "@/components/pages/AccountsStatus";
 import { Statements } from "@/components/pages/Statements";
 import { MasterList } from "@/components/pages/MasterList";
 import { Pending } from "@/components/pages/Pending";
+import { Deleted } from "@/components/pages/Deleted";
 import { Unknown } from "@/components/pages/Unknown";
 import { Closed } from "@/components/pages/Closed";
 import { UsersAdmin } from "@/components/pages/UsersAdmin";
@@ -55,16 +56,16 @@ function AppShellContent({ auth }: { auth: ReturnType<typeof useAuth> }) {
       case "cih/personal": return <CihWallets token={token} personal={true} />;
       case "cih/limit-availability": return <LimitAvailability token={token} />;
 
-      case "monitoring/agent": return <Monitoring token={token} slug="agent" />;
-      case "monitoring/personal": return <Monitoring token={token} slug="personal" />;
-      case "monitoring/vip": return <Monitoring token={token} slug="vip" />;
-      case "monitoring/withdrawal": return <Monitoring token={token} slug="withdrawal" />;
-      case "monitoring/permanent-stop": return <Monitoring token={token} slug="permanent-stop" />;
+      case "monitoring/agent": return <Monitoring key="mon-agent" token={token} slug="agent" />;
+      case "monitoring/personal": return <Monitoring key="mon-personal" token={token} slug="personal" />;
+      case "monitoring/vip": return <Monitoring key="mon-vip" token={token} slug="vip" />;
+      case "monitoring/withdrawal": return <Monitoring key="mon-withdrawal" token={token} slug="withdrawal" />;
+      case "monitoring/permanent-stop": return <Monitoring key="mon-permanent-stop" token={token} slug="permanent-stop" />;
 
-      case "overview/agent": return <Overview token={token} slug="agent" />;
-      case "overview/personal": return <Overview token={token} slug="personal" />;
-      case "overview/high-discrepancy": return <Overview token={token} slug="high-discrepancy" />;
-      case "overview/limit-reached": return <Overview token={token} slug="limit-reached" />;
+      case "overview/agent": return <Overview key="ov-agent" token={token} slug="agent" />;
+      case "overview/personal": return <Overview key="ov-personal" token={token} slug="personal" />;
+      case "overview/high-discrepancy": return <Overview key="ov-high-discrepancy" token={token} slug="high-discrepancy" />;
+      case "overview/limit-reached": return <Overview key="ov-limit-reached" token={token} slug="limit-reached" />;
 
       case "data/import": return <DataImport token={token} can={auth.can} onGenerated={auth.setLastGenerate} />;
       case "data/active": return <AccountsStatus token={token} slug="active" />;
@@ -74,6 +75,7 @@ function AppShellContent({ auth }: { auth: ReturnType<typeof useAuth> }) {
 
       case "master/list": return <MasterList token={token} can={auth.can} />;
       case "master/pending": return <Pending token={token} can={auth.can} />;
+      case "master/deleted": return <Deleted token={token} can={auth.can} />;
       case "master/unknown": return <Unknown token={token} can={auth.can} />;
       case "master/closed": return <Closed token={token} can={auth.can} />;
 

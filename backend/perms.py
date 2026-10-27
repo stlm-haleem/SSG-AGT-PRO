@@ -30,11 +30,12 @@ PERMISSION_TREE = [
     ]),
     ("master", "Wallet Masterlist", [
         ("master_list", "Master List"), ("unknown", "Unknown Accounts"),
-        ("pending", "Pending Accounts"), ("closed", "Permanently Closed"),
+        ("pending", "Pending Accounts"), ("deleted", "Deleted Accounts"), ("closed", "Permanently Closed"),
         ("master_edit", "Edit Master List"), ("master_delete", "Delete Master List rows"),
         ("unknown_edit", "Add Unknown to Master"), ("pending_edit", "Update Pending wallet"),
         ("pending_delete", "Delete Pending"), ("closed_edit", "Edit Permanently Closed"),
-        ("closed_delete", "Delete Permanently Closed"),
+        ("closed_delete", "Delete Permanently Closed"), ("deleted_restore", "Restore Deleted Accounts"),
+        ("deleted_delete", "Remove from Deleted list"),
     ]),
     ("admin", "Administration", [
         ("admin_users", "Users"), ("admin_roles", "Manage Roles"), ("admin_integrations", "Integrations"),
@@ -49,8 +50,8 @@ ALL_KEYS = [k for _, _, items in PERMISSION_TREE for k, _ in items]
 ADMIN_KEYS = {k for k in ALL_KEYS if k.startswith("admin")}
 LABELS = {k: label for _, _, items in PERMISSION_TREE for k, label in items}
 
-_OPERATIONS = [k for k in ALL_KEYS if k not in ADMIN_KEYS and k not in ("imports_delete", "master_delete", "pending_delete", "closed_delete")]
-_VIEWER = [k for k in ALL_KEYS if not k.endswith(("_edit", "_delete", "_generate")) and k not in ADMIN_KEYS
+_OPERATIONS = [k for k in ALL_KEYS if k not in ADMIN_KEYS and k not in ("imports_delete", "master_delete", "pending_delete", "closed_delete", "deleted_delete")]
+_VIEWER = [k for k in ALL_KEYS if not k.endswith(("_edit", "_delete", "_generate", "_restore")) and k not in ADMIN_KEYS
            and not k.startswith("imports_")]
 
 DEFAULT_ROLES = {

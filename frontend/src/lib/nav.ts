@@ -1,6 +1,6 @@
 import {
   Activity, AlertOctagon, Archive, BadgeCheck, BarChart3, Banknote, Building2, ClipboardList, Database, FileSpreadsheet,
-  Ban, Gauge, Gem, HelpCircle, Hourglass, KeyRound, LayoutDashboard, LineChart, ListChecks, Lock, PlugZap, Radar, ScrollText,
+  Ban, ArchiveX, Gauge, Gem, HelpCircle, Hourglass, KeyRound, LayoutDashboard, LineChart, ListChecks, Lock, PlugZap, Radar, ScrollText,
   ShieldCheck, ShieldAlert, Sigma, TableProperties, Upload, UserCog, Users, Wallet, WalletCards, type LucideIcon,
 } from "lucide-react";
 
@@ -71,6 +71,7 @@ export const NAV: NavGroup[] = [
     items: [
       { route: "master/list", label: "Master List", icon: TableProperties, perm: "master_list" },
       { route: "master/pending", label: "Pending Accounts", icon: Hourglass, perm: "pending" },
+      { route: "master/deleted", label: "Deleted", icon: ArchiveX, perm: "deleted" },
       { route: "master/unknown", label: "Unknown Accounts", icon: HelpCircle, perm: "unknown" },
       { route: "master/closed", label: "Permanently Closed", icon: Archive, perm: "closed" },
     ],

@@ -25,7 +25,14 @@ export function Overview({ token, slug }: { token: string; slug: "agent" | "pers
   const [sortRbal, setSortRbal] = useState("");
   const [threshold, setThreshold] = useState("0");
   const debouncedThreshold = useDebounced(threshold, 400);
-  const [status, setStatus] = useState<string[]>([]);
+  // Filters available on every Account Overview tab
+  const [fCode, setFCode] = useState<string[]>([]);
+  const [fWallet, setFWallet] = useState<string[]>([]);
+  const [fLimitStatus, setFLimitStatus] = useState<string[]>([]);
+  const [fAcctType, setFAcctType] = useState<string[]>([]);
+  const [fTags, setFTags] = useState<string[]>([]);
+  const [fStatus, setFStatus] = useState<string[]>([]);
+  const [fWhrs, setFWhrs] = useState<string[]>([]);
   const [category, setCategory] = useState("ALL");
   const [limitType, setLimitType] = useState("ALL");
   const toast = useToast();
@@ -33,14 +40,19 @@ export function Overview({ token, slug }: { token: string; slug: "agent" | "pers
 
   const isHighDiscrepancy = slug === "high-discrepancy";
   const isLimitReached = slug === "limit-reached";
-  const params: Record<string, any> = { q, sort_rbal: sortRbal };
-  if (isHighDiscrepancy) { params.threshold = debouncedThreshold; params.category = category; params.status = status; }
+  const params: Record<string, any> = {
+    q, sort_rbal: sortRbal, f_code: fCode, f_wallet: fWallet, f_limit_status: fLimitStatus,
+    f_acct_type: fAcctType, f_tags: fTags, f_status: fStatus, f_whrs: fWhrs,
+  };
+  const activeFilters = [fCode, fWallet, fLimitStatus, fAcctType, fTags, fStatus, fWhrs].reduce((n, a) => n + a.length, 0);
+  const clearFilters = () => { setFCode([]); setFWallet([]); setFLimitStatus([]); setFAcctType([]); setFTags([]); setFStatus([]); setFWhrs([]); };
+  if (isHighDiscrepancy) { params.threshold = debouncedThreshold; params.category = category; }
   else if (isLimitReached) { params.limit_type = limitType; }
   else { params.threshold = debouncedThreshold; }
 
   const { data, loading, error, meta, page, setPage, perPage, setPerPage, reload } = usePaged<any>(`/ssg/overview/${slug}`, token, params);
   const Icon = ICONS[slug];
-  const options = data?.options ?? { status: [] };
+  const options = data?.options ?? { code: [], wallet: [], limit_status: [], acct_type: [], tags: [], status: [], whrs: [] };
 
   const doExport = async () => {
     setExporting(true);
@@ -77,7 +89,6 @@ export function Overview({ token, slug }: { token: string; slug: "agent" | "pers
               <select value={category} onChange={(e) => setCategory(e.target.value)} className="h-9 rounded-lg border bg-background px-2 text-sm">
                 {["ALL", "AGENT", "PERSONAL"].map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
-              <MultiSelect label="Status" options={options.status} value={status} onChange={setStatus} />
             </>
           )}
           <select value={sortRbal} onChange={(e) => setSortRbal(e.target.value)} title="R. BAL sort" className="h-9 rounded-lg border bg-background px-2 text-sm">
@@ -92,6 +103,16 @@ export function Overview({ token, slug }: { token: string; slug: "agent" | "pers
               <option value="monthly">Monthly reach limit</option>
             </select>
           )}
+        </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <MultiSelect label="Code" options={options.code} value={fCode} onChange={setFCode} />
+          <MultiSelect label="Wallet" options={options.wallet} value={fWallet} onChange={setFWallet} />
+          <MultiSelect label="Limit status" options={options.limit_status} value={fLimitStatus} onChange={setFLimitStatus} />
+          <MultiSelect label="Acct type" options={options.acct_type} value={fAcctType} onChange={setFAcctType} />
+          <MultiSelect label="Tags" options={options.tags} value={fTags} onChange={setFTags} />
+          <MultiSelect label="Status" options={options.status} value={fStatus} onChange={setFStatus} />
+          <MultiSelect label="W. HRS" options={options.whrs} value={fWhrs} onChange={setFWhrs} />
+          {activeFilters > 0 && <Button variant="ghost" size="sm" onClick={clearFilters}>Clear filters ({activeFilters})</Button>}
         </div>
         {error && <ErrorNote message={error} />}
         {loading && !data ? <TableSkeleton cols={7} /> : (
