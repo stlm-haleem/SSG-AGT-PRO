@@ -562,11 +562,15 @@ class IntegrationManager:
 
     def _report_df(self, report_name):
         if report_name == "limit-utilization":
-            d=self.logic.dashboard_limit_utilization(); return {
-                "AGENT ACCOUNTS - UTILIZED LIMIT":d["agent"],
-                "PERSONAL EBANKING - UTILIZED LIMIT":d["personal_ebanking"],
-                "PERSONAL IBANKING - UTILIZED LIMIT":d["personal_ibanking"],
-            }
+            from . import utilization_view as UV
+            state=self.logic.util_view.get()
+            tables=UV.build(self.logic,state)["tables"]
+            out={}
+            for key in UV.TABLE_KEYS:
+                title=UV.TABLE_TITLES[key].upper().replace(" — "," - ")
+                fs=UV.filter_summary(state,key)
+                out[title+(f"  [{fs}]" if fs else "")]=tables[key]
+            return out
         if report_name == "cih-agent":
             df=self.logic._cih_wallet_table(False).copy()
             counts_balance=self.logic._cih_count_table(False,False).copy()
@@ -624,13 +628,12 @@ class IntegrationManager:
         sized to the handful of wallets these reports always have."""
         try:
             if report_name=="limit-utilization":
-                df=self.logic.dashboard_limit_utilization()["agent"]
-                if df is None or df.empty: return None
-                df=df[~df.iloc[:,0].astype(str).str.upper().eq("TOTAL")]
-                if df.empty or "LIMIT" not in df.columns or "DEPOSIT" not in df.columns: return None
-                cats=[str(v) for v in df.iloc[:,0].tolist()][:8]
-                limits=[float(v or 0) for v in df["LIMIT"].tolist()][:8]
-                deposits=[float(v or 0) for v in df["DEPOSIT"].tolist()][:8]
+                from . import utilization_view as UV
+                rows=UV.build(self.logic,self.logic.util_view.get())["chart"]
+                if not rows: return None
+                cats=[str(r["wallet"]) for r in rows]
+                limits=[float(r["Limit"] or 0) for r in rows]
+                deposits=[float(r["Deposit"] or 0) for r in rows]
                 if not any(limits) and not any(deposits): return None
                 return {"type":"bar","title":"Agent Limit vs Deposit","categories":cats,
                         "series":[("Limit",self.CHART_PALETTE[0],limits),("Deposit",self.CHART_PALETTE[1],deposits)]}
@@ -801,7 +804,7 @@ class IntegrationManager:
         thread_id=int(raw_thread) if raw_thread else None
         generated_at = generated_at or datetime.now().astimezone()
         path=self.build_report_image(report_name)
-        data={"chat_id":chat_id,"caption":self._caption(report_name, generated_at)}
+        data={"chat_id":chat_id,"caption":self._full_caption(report_name, generated_at)}
         if thread_id is not None: data["message_thread_id"]=str(thread_id)
         with open(path,"rb") as f:
             self._tg("sendPhoto", data=data, files={"photo":(path.name,f,"image/png")})
@@ -819,7 +822,7 @@ class IntegrationManager:
         if not chat_id:
             raise RuntimeError("Telegram chat ID is not configured.")
         path=self.build_report_image(report_name)
-        data={"chat_id":chat_id,"caption":self._caption(report_name, generated_at)}
+        data={"chat_id":chat_id,"caption":self._full_caption(report_name, generated_at)}
         if thread_id is not None: data["message_thread_id"]=str(thread_id)
         with open(path,"rb") as f:
             self._tg("sendPhoto", data=data, files={"photo":(path.name,f,"image/png")})
@@ -830,6 +833,15 @@ class IntegrationManager:
         for name in reports:
             total += self.send_report(name, use_web_topic=use_web_topic)
         return total
+
+    def _full_caption(self, name, generated_at=None):
+        cap=self._caption(name, generated_at)
+        if name=="limit-utilization":
+            try:
+                from . import utilization_view as UV
+                cap+="\n"+UV.view_info(self.logic.util_view.get(),UV.now_bdt())["summary"]
+            except Exception: pass
+        return cap
 
     @staticmethod
     def _format_report_timestamp(value):

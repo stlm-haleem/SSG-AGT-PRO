@@ -28,6 +28,7 @@ from models import User
 from ssg.logic_core import AppData, BusinessLogic, DATA_DIR, MONITOR_COLUMNS
 from ssg.integrations import IntegrationManager
 from ssg import filters as F
+from ssg import utilization_view as UV
 
 EXPORTS = DATA_DIR / "exports"
 EXPORTS.mkdir(parents=True, exist_ok=True)
@@ -37,6 +38,8 @@ UPLOAD_TMP.mkdir(parents=True, exist_ok=True)
 DATA = AppData()
 LOGIC = BusinessLogic(DATA)
 INTEGRATIONS = IntegrationManager(DATA_DIR, LOGIC, DATA)
+UTIL_VIEW = UV.UtilizationView(DATA_DIR / "utilization_view.json")
+LOGIC.util_view = UTIL_VIEW  # shared view: the Telegram report sends exactly what the Command Center shows
 
 DATASETS = ["Deposit History", "Pay Out History", "Account Statement", "Active Accounts", "Locked Accounts",
             "Disabled Accounts", "Opening", "Limit", "Settlement / Top up"]
@@ -166,17 +169,32 @@ def ssg_status(user: User = Depends(get_current_user)):
 
 @router.get("/dashboard")
 def command_center(user: User = Depends(perm("dashboard"))):
-    util = LOGIC.dashboard_limit_utilization()
     fin = ["LIMIT", "Remaining Limit", "DEPOSIT"]
+    built = UV.build(LOGIC, UTIL_VIEW.get())
     return {
         "totals": {k: float(v) for k, v in LOGIC.dashboard_totals().items()},
-        "utilization": {
-            "agent": pack(util["agent"], fin),
-            "personal_ebanking": pack(util["personal_ebanking"], fin),
-            "personal_ibanking": pack(util["personal_ibanking"], fin),
-        },
+        "utilization": {k: pack(df, fin) for k, df in built["tables"].items()},
+        "titles": UV.TABLE_TITLES,
+        "options": built["options"],
+        "chart": built["chart"],
+        "view": {**built["info"], "tables": UTIL_VIEW.get()["tables"]},
         "telegram_configured": INTEGRATIONS.telegram_configured(),
     }
+
+
+class UtilViewIn(BaseModel):
+    tables: Optional[dict] = None          # {table_key: {group_code: [], wallet: [], hours: []}}
+    auto_enabled: Optional[bool] = None    # False = manual stop (count all hours)
+    windows: Optional[dict] = None         # {"14": {"start": "08:00", "end": "21:58"}, "16": {...}}
+
+
+@router.post("/dashboard/view")
+def command_center_view(p: UtilViewIn, user: User = Depends(perm("dashboard", "dashboard_generate"))):
+    try:
+        UTIL_VIEW.update(tables=p.tables, auto_enabled=p.auto_enabled, windows=p.windows)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"message": "Command Center view saved."}
 
 
 # --------------------------------------------------------------------- CIH ---

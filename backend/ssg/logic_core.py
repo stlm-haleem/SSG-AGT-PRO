@@ -1858,6 +1858,7 @@ class BusinessLogic:
         self.data.merchant_deposit_result = merchant_deposit
         self.data.merchant_payout_result = merchant_payout
         self.data.deposit_type_result = deposit_type
+        self.data.summary_range = (from_date, to_date)  # lets the Command Center split deposits by Normal/VIP for the same range
         self.data._touch_summary()
 
         return account_statement

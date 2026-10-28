@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, RefreshCw, Scale, Send, Repeat2, LayoutDashboard } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowDownToLine, ArrowUpFromLine, RefreshCw, Scale, Send, Repeat2, LayoutDashboard, Clock, PauseCircle, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MultiSelect } from "@/components/common/MultiSelect";
 import { PageHeader } from "@/components/common/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Table } from "@/components/common/DataTable";
@@ -12,11 +13,30 @@ import { useFetch } from "@/hooks/useFetch";
 import { apiSend } from "@/lib/api";
 import { money } from "@/lib/format";
 
+type TableKey = "agent_normal" | "ebanking_normal" | "ibanking_normal" | "agent_vip" | "ebanking_vip" | "ibanking_vip";
+interface TableFilter { group_code: string[]; wallet: string[]; hours: string[] }
+interface Win { start: string; end: string }
 interface Resp {
   totals: Record<string, number>;
-  utilization: { agent: Table; personal_ebanking: Table; personal_ibanking: Table };
+  utilization: Record<TableKey, Table>;
+  titles: Record<TableKey, string>;
+  options: Record<TableKey, TableFilter>;
+  chart: { wallet: string; Limit: number; Deposit: number }[];
+  view: {
+    auto_enabled: boolean;
+    windows: Record<string, Win>;
+    now_bdt: string;
+    open_hours: string[];
+    closed_hours: string[];
+    summary: string;
+    tables: Record<TableKey, TableFilter>;
+  };
   telegram_configured: boolean;
 }
+
+const NORMAL_KEYS: TableKey[] = ["agent_normal", "ebanking_normal", "ibanking_normal"];
+const VIP_KEYS: TableKey[] = ["agent_vip", "ebanking_vip", "ibanking_vip"];
+const SPANS = ["xl:col-span-3", "xl:col-span-3", "xl:col-span-2"];
 
 const REPORTS: [string, string][] = [
   ["limit-utilization", "Limit utilization"],
@@ -30,6 +50,24 @@ export function CommandCenter({ token, can }: { token: string; can: (k: string) 
   const { data, loading, error, reload } = useFetch<Resp>("/ssg/dashboard", token);
   const toast = useToast();
   const [sending, setSending] = useState("");
+  const [wins, setWins] = useState<Record<string, Win>>({});
+  const canEditView = can("dashboard_generate");
+
+  useEffect(() => { if (data) setWins(data.view.windows); }, [data]);
+
+  const saveView = async (body: Record<string, unknown>, okMsg?: string) => {
+    try {
+      await apiSend("/ssg/dashboard/view", token, "POST", body);
+      if (okMsg) toast.success(okMsg);
+      reload();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not save the view");
+    }
+  };
+  const setFilter = (key: TableKey, field: keyof TableFilter, value: string[]) => {
+    if (!data) return;
+    saveView({ tables: { [key]: { ...data.view.tables[key], [field]: value } } });
+  };
 
   const send = async (name: string) => {
     setSending(name);
@@ -51,11 +89,10 @@ export function CommandCenter({ token, can }: { token: string; can: (k: string) 
   const dep = t["Total Deposit"] ?? 0;
   const pay = t["Total Pay out"] ?? 0;
   const stlm = t["Total STLM / Top Up"] ?? 0;
-  const noData = dep === 0 && pay === 0 && data.utilization.agent.rows.length <= 1;
+  const noData = dep === 0 && pay === 0 && data.utilization.agent_normal.rows.length <= 1;
 
-  const chart = data.utilization.agent.rows
-    .filter((r) => String(r["WALLET"]).toUpperCase() !== "TOTAL")
-    .map((r) => ({ wallet: r["WALLET"], Limit: Number(r["LIMIT"] ?? 0), Deposit: Number(r["DEPOSIT"] ?? 0) }));
+  const chart = data.chart.map((r) => ({ wallet: r.wallet, Limit: Number(r.Limit ?? 0), Deposit: Number(r.Deposit ?? 0) }));
+  const v = data.view;
 
   const flowSlices = [
     { name: "Deposit", value: Math.max(dep, 0), color: "#14b8a6" },
@@ -129,19 +166,51 @@ export function CommandCenter({ token, can }: { token: string; can: (k: string) 
             <div className="flex justify-between border-t pt-3"><span className="text-muted-foreground">Net flow</span><span className="num font-semibold">{money(dep - pay, false)}</span></div>
           </div>
         </section>
-        <section className="surface p-5 xl:col-span-3">
-          <h2 className="mb-3 text-sm font-semibold">Agent accounts — utilized limit</h2>
-          <DataTable table={data.utilization.agent} dense emptyTitle="No agent limit data" />
-        </section>
-        <section className="surface p-5 xl:col-span-3">
-          <h2 className="mb-3 text-sm font-semibold">Personal eBanking — utilized limit</h2>
-          <DataTable table={data.utilization.personal_ebanking} dense emptyTitle="No eBanking data" />
-        </section>
-        <section className="surface p-5 xl:col-span-2">
-          <h2 className="mb-3 text-sm font-semibold">Personal iBanking — utilized limit</h2>
-          <DataTable table={data.utilization.personal_ibanking} dense emptyTitle="No iBanking data" />
-        </section>
       </div>
+
+      <section className="surface space-y-3 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <Clock className="h-4 w-4 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold">Working-hours auto filter <span className="font-normal text-muted-foreground">· {v.now_bdt}</span></div>
+            <div className={v.auto_enabled ? "text-xs text-muted-foreground" : "text-xs font-medium text-warning"}>{v.summary}</div>
+          </div>
+          {canEditView && (
+            <Button size="sm" variant={v.auto_enabled ? "outline" : "default"} onClick={() => saveView({ auto_enabled: !v.auto_enabled })}>
+              {v.auto_enabled ? <><PauseCircle className="h-3.5 w-3.5" /> Stop auto filter</> : <><PlayCircle className="h-3.5 w-3.5" /> Resume auto filter</>}
+            </Button>
+          )}
+        </div>
+        <div className="flex flex-wrap items-end gap-4 border-t pt-3 text-xs">
+          {["14", "16"].map((h) => (
+            <div key={h} className="flex items-center gap-2">
+              <span className="w-14 font-medium">{h} Hours</span>
+              <input type="time" disabled={!canEditView} value={wins[h]?.start ?? ""} onChange={(e) => setWins({ ...wins, [h]: { ...wins[h], start: e.target.value } })} className="h-8 rounded-md border border-input bg-background px-2" />
+              <span>to</span>
+              <input type="time" disabled={!canEditView} value={wins[h]?.end ?? ""} onChange={(e) => setWins({ ...wins, [h]: { ...wins[h], end: e.target.value } })} className="h-8 rounded-md border border-input bg-background px-2" />
+            </div>
+          ))}
+          <span className="text-muted-foreground">Bangladesh time (BDT). 24-hour accounts always count.</span>
+          {canEditView && <Button size="sm" variant="outline" onClick={() => saveView({ windows: wins }, "Working hours saved.")}>Save hours</Button>}
+        </div>
+      </section>
+
+      {([["Normal accounts", NORMAL_KEYS], ["VIP accounts (DP set for VIP levels)", VIP_KEYS]] as [string, TableKey[]][]).map(([label, keys]) => (
+        <section key={label} className="surface space-y-4 p-5">
+          <h2 className="text-base font-semibold">{label}</h2>
+          <div className="grid gap-6 xl:grid-cols-8">
+            {keys.map((k, i) => (
+              <div key={k} className={`${SPANS[i]} min-w-0`}>
+                <h3 className="mb-2 text-sm font-semibold">{data.titles[k]}</h3>
+                <div className="mb-3 flex flex-wrap gap-2">
+                  <MultiSelect label="Hours" options={data.options[k].hours} value={v.tables[k].hours} onChange={(x) => canEditView && setFilter(k, "hours", x)} className="min-w-[110px]" />
+                </div>
+                <DataTable table={data.utilization[k]} dense emptyTitle="No limit data" />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
