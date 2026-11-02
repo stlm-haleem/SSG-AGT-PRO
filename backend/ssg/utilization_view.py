@@ -1,13 +1,22 @@
-"""Command Center "utilized limit" tables: Normal / VIP split, filters and working-hours auto filter.
+"""Command Center "utilized limit" tables (Normal / VIP x Agent / eBanking / iBanking).
 
-Scope (by design): this only changes the LIMIT / Remaining Limit / Counts columns of the six
-utilized-limit tables (and the Command Center chart).  The DEPOSIT column is split the same way
-(by the receiving account's Normal/VIP tier, filters and working-hours rule) so Limit vs Deposit compare
-like-for-like.  Withdrawal, running balance etc. are untouched.
+Fixed rules (Group codes are "contains" rules, case-insensitive; no Group filter in the UI):
 
-* Tier: GROUP CODE starting with "VIP" -> VIP, everything else ("NORMAL ..." or no prefix) -> Normal.
-* Working hours: 14H / 16H accounts count only while their window is open in Bangladesh time (UTC+6).
-  24H accounts (and anything without a 14/16 window) always count.
+  table            keyword     LIMIT (master list)                      REMAINING LIMIT + COUNTS (Limit import)          DEPOSIT (Limit import)
+  agent_normal     NORMAL AG   GROUP CODE contains keyword, not "locked"  contains keyword AND "DP", not "locked", Login=Yes, Status=Active  contains keyword, not "locked", sum "Total DP"
+  ebanking_normal  NORMAL EB   (same)                                   (same)                                             (same)
+  ibanking_normal  NORMAL IB   ...
+  agent_vip        VIP AG      ...
+  ebanking_vip     VIP EB      ...
+  ibanking_vip     VIP IB      ...
+
+  "locked" = any Group code that contains "locked" (e.g. "Account Locked", "Fully Locked-No Transactions").
+  LIMIT sums "MRC DP LIMIT" from the master; Remaining Limit sums "Remaining DP"; DEPOSIT sums "Total DP" (both Limit import).
+
+On top of the Group rule (unchanged features):
+* Hours filter and working-hours auto filter.  Hours (14 / 16 / 24) come from the group name (master HOURS when the
+  name has none).  14H / 16H accounts count only while their window is open in Bangladesh time (UTC+6); 24H always.
+* Personal tables skip accounts that reached the monthly limit.
 * The saved view (per-table filters, windows, auto-filter on/off) is ONE shared server-side state so the
   Telegram report can send exactly what the dashboard currently shows.
 """
@@ -21,7 +30,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .logic_core import AppData, BusinessLogic
+from .logic_core import AppData, BusinessLogic, _XML_ESC_RE, clean_group_label
 
 BDT = timezone(timedelta(hours=6))  # Bangladesh has no DST
 
@@ -37,6 +46,14 @@ TABLE_TITLES = {
 AGENT_WALLETS = ["BKASH", "NAGAD", "ROCKET", "UPAY"]
 PERSONAL_WALLETS = ["BKASHC", "NAGADC", "ROCKETC", "UPAYC"]
 HOUR_OPTIONS = ["14 Hours", "16 Hours", "24 Hours"]
+
+# Fixed Group-code rules (see module docstring).  Not user-editable and not shown in the UI.
+TABLE_TOKENS = {
+    "agent_normal": "NORMAL AG", "ebanking_normal": "NORMAL EB", "ibanking_normal": "NORMAL IB",
+    "agent_vip": "VIP AG", "ebanking_vip": "VIP EB", "ibanking_vip": "VIP IB",
+}
+REMAINING_ALSO = "DP"   # Remaining Limit / Counts: Group code must also contain this
+LOCKED = "locked"       # LIMIT: Group code must NOT contain this (any code containing "locked")
 
 DEFAULT_STATE = {
     "auto_enabled": True,
@@ -56,8 +73,20 @@ def hours_of(*texts) -> str:
     return ""
 
 
-def tier_of(group) -> str:
-    return "VIP" if str(group or "").strip().upper().startswith("VIP") else "Normal"
+_DASHES_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")  # hyphen variants, en/em dash, minus
+
+
+def norm_group(group) -> str:
+    """Comparison key for a Group code: Excel "_x0009_" escapes decoded, dash variants unified,
+    whitespace collapsed + trimmed, case-insensitive."""
+    text = _XML_ESC_RE.sub(lambda m: chr(int(m.group(1), 16)), str(group if group is not None else ""))
+    text = _DASHES_RE.sub("-", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def has(groups: pd.Series, token: str) -> pd.Series:
+    """True where the Group code contains the token (case-insensitive, whitespace / dash variants / _x0009_ ignored)."""
+    return groups.map(norm_group).str.contains(norm_group(token), regex=False)
 
 
 def _minutes(hhmm: str) -> int:
@@ -170,67 +199,51 @@ def _prep_master(logic: BusinessLogic) -> pd.DataFrame:
     logic.cih_limit_availability()  # keeps the master in sync, exactly like the CIH Limit Availability page
     master = AppData._normalise_master(logic.data.dataframes.get("Wallet Account Master List"))
     if master is None or master.empty:
-        return pd.DataFrame(columns=["WALLET", "GROUP CODE", "ACCOUNT TYPE", "HOURS", "METHOD", "MRC DP LIMIT", "_H", "_TIER"])
+        return pd.DataFrame(columns=["WALLETNAME", "WALLET", "GROUP CODE", "HOURS", "MRC DP LIMIT", "_H"])
     m = master.copy().fillna("")
     m["WALLET"] = m["WALLET"].astype(str).str.strip().str.upper()
     m["GROUP CODE"] = m["GROUP CODE"].astype(str).str.strip()
-    m["ACCOUNT TYPE"] = m["ACCOUNT TYPE"].astype(str).str.strip().str.upper()
     m["HOURS"] = m["HOURS"].astype(str).map(logic._availability_canonical_hours)
-    m["METHOD"] = m["METHOD"].astype(str).map(logic._availability_canonical_method)
     m["MRC DP LIMIT"] = m["MRC DP LIMIT"].apply(logic._number)
-    m = m[~m["GROUP CODE"].map(logic._availability_locked_group)].copy()
-    m["_H"] = [hours_of(h, g) for h, g in zip(m["HOURS"], m["GROUP CODE"])]
-    m["_TIER"] = m["GROUP CODE"].map(tier_of)
+    m["_H"] = [hours_of(g, h) for h, g in zip(m["HOURS"], m["GROUP CODE"])]  # hours come from the group name first
     return m
 
 
 def _prep_raw(logic: BusinessLogic) -> pd.DataFrame:
-    cols = ["WALLET", "GROUP", "REMAINING_DP", "LOGIN", "STATUS", "_H", "_TIER"]
+    """Raw Limit import: Remaining DP (Remaining Limit / Counts) and Total DP (DEPOSIT) per account."""
+    cols = ["WALLET", "GROUP", "ACCOUNT", "REMAINING_DP", "TOTAL_DP", "LOGIN", "STATUS", "_H"]
     limit = logic.data.dataframes.get("Limit")
     if limit is None or limit.empty:
         return pd.DataFrame(columns=cols)
     bank, grp = logic._source_col(limit, "Bank", 0), logic._source_col(limit, "Group", 2)
+    acct = logic._source_col(limit, "Account", 3)
+    tdp = logic._source_col(limit, "Total DP", 7)
     rem, login, status = (logic._source_col(limit, "Remaining DP", 11), logic._source_col(limit, "Login", 13),
                           logic._source_col(limit, "Status", 14))
-    if any(c is None for c in (bank, grp, rem, login, status)):
+    if any(c is None for c in (bank, grp, acct, tdp, rem, login, status)):
         return pd.DataFrame(columns=cols)
     raw = pd.DataFrame({
         "WALLET": limit[bank].fillna("").astype(str).str.strip().str.upper(),
-        "GROUP": limit[grp].fillna("").astype(str).str.strip(),
+        "GROUP": limit[grp].map(clean_group_label),
+        "ACCOUNT": limit[acct].map(lambda v: logic.clean_wallet_account(v) or str(v or "").strip()).astype(str).str.strip().str.upper(),
         "REMAINING_DP": limit[rem].apply(logic._number),
+        "TOTAL_DP": limit[tdp].apply(logic._number),
         "LOGIN": limit[login].fillna("").astype(str).str.strip().str.upper(),
         "STATUS": limit[status].fillna("").astype(str).str.strip().str.upper(),
     })
     raw["_H"] = raw["GROUP"].map(lambda g: hours_of(g))
-    raw["_TIER"] = raw["GROUP"].map(tier_of)
     return raw
 
 
-def _prep_deposits(logic: BusinessLogic, master: pd.DataFrame) -> pd.DataFrame:
-    """Successful deposits of the generated summary range, tagged with the receiving account's
-    Group code / hours / tier from the master (unknown account -> Normal, hours always open)."""
-    cols = ["WALLET", "DTYPE", "AMOUNT", "GROUP", "_H", "_TIER"]
-    summary = logic.data.deposit_type_result
-    dep = logic.data.dataframes.get("Deposit History")
-    if summary is None or summary.empty or dep is None or dep.empty:
-        return pd.DataFrame(columns=cols)  # Deposit stays 0 until Generate Summary, same as before
-    need = {"Deposit Type", "Bank", "Amount", "Status", "Updated Time", "To Account"}
-    if not need.issubset(dep.columns):
-        return pd.DataFrame(columns=cols)
-    fd, td = getattr(logic.data, "summary_range", (None, None))
-    df = logic.filter_by_updated_time(dep.copy(), fd, td, "Updated Time")
-    df = df[logic.normalize_status(df["Status"]) == "successful"]
-    out = pd.DataFrame({
-        "WALLET": logic.normalize_bank(df["Bank"]),
-        "DTYPE": df["Deposit Type"].astype(str).str.strip().str.upper(),
-        "AMOUNT": pd.to_numeric(df["Amount"], errors="coerce").fillna(0),
-        "ACCT": df["To Account"].apply(logic.clean_wallet_account).fillna("").astype(str).str.strip().str.upper(),
-    })
-    info = master.assign(_K=master["WALLETNAME"].astype(str).str.strip().str.upper()).drop_duplicates("_K").set_index("_K")
-    out["GROUP"] = out["ACCT"].map(info["GROUP CODE"]).fillna("")
-    out["_H"] = out["ACCT"].map(info["_H"]).fillna("")
-    out["_TIER"] = out["GROUP"].map(tier_of)  # no group code -> Normal
-    return out
+def _fill_hours_from_master(raw: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
+    """Limit-import rows whose group name carries no 14 / 16 / 24 take the account's hours from the master."""
+    if raw.empty or master.empty:
+        return raw
+    hmap = (master.assign(_K=master["WALLETNAME"].astype(str).str.strip().str.upper())
+            .drop_duplicates("_K").set_index("_K")["_H"])
+    raw = raw.copy()
+    raw["_H"] = raw["_H"].where(raw["_H"].ne(""), raw["ACCOUNT"].map(hmap).fillna(""))
+    return raw
 
 
 def _hours_filter_keys(selected: list[str]) -> set[str]:
@@ -239,67 +252,54 @@ def _hours_filter_keys(selected: list[str]) -> set[str]:
 
 def build(logic: BusinessLogic, state: dict, now: datetime | None = None) -> dict:
     now = now or now_bdt()
-    master, raw = _prep_master(logic), _prep_raw(logic)
-    deps = _prep_deposits(logic, master)
+    master = _prep_master(logic)
+    raw = _fill_hours_from_master(_prep_raw(logic), master)
+    # Personal accounts that reached the monthly limit are not monitored against the daily limit at all
+    reached = set(logic.data.monthly_reached_names())
 
     def table(key: str):
-        family, tier = key.rsplit("_", 1)
-        tier = "VIP" if tier == "vip" else "Normal"
+        family = key.rsplit("_", 1)[0]
+        token = TABLE_TOKENS[key]
         wallets = AGENT_WALLETS if family == "agent" else PERSONAL_WALLETS
         f = state["tables"][key]
         h_sel = _hours_filter_keys(f["hours"])
 
-        # ---- master population (LIMIT) ----
-        if family == "agent":
-            # same buckets as the CIH Limit Availability agent table (rows with a non-standard HOURS value are not counted there)
-            pop = master[~master["ACCOUNT TYPE"].map(logic._availability_type_is_personal)
-                         & master["HOURS"].isin(["14 Hours", "16 Hours", "18 Hours", "24 Hours", "24-H0s INTERVAL"])]
-        else:
-            pop = master[master["ACCOUNT TYPE"].map(logic._availability_type_is_personal)
-                         & master["METHOD"].eq(family.upper())]
-        pop = pop[pop["_TIER"].eq(tier)]
-        options = {
-            "group_code": sorted({g for g in pop["GROUP CODE"] if g}),
-            "wallet": list(wallets),
-            "hours": HOUR_OPTIONS,
-        }
-
-        def narrow(df, group_col, h_col):
+        def narrow(df, h_col="_H"):
             if h_sel:
                 df = df[df[h_col].isin(h_sel)]
             if state["auto_enabled"] and not df.empty:
                 df = df[[is_open(h, state, now) for h in df[h_col]]]
             return df
 
-        pop = narrow(pop, "GROUP CODE", "_H")
+        # ---- LIMIT: master list, Group code contains the token and NOT "locked" ----
+        pop = master[has(master["GROUP CODE"], token) & ~has(master["GROUP CODE"], LOCKED)]
+        if family != "agent" and reached:
+            pop = pop[~pop["WALLETNAME"].astype(str).str.strip().str.upper().isin(reached)]
+        # kept for API compatibility only; the UI does not show a Group code filter
+        options = {"group_code": sorted({g for g in pop["GROUP CODE"] if g}), "wallet": list(wallets), "hours": HOUR_OPTIONS}
+        pop = narrow(pop)
 
-        # ---- raw Limit population (Remaining Limit / Counts) -- same qualifying rules as before ----
-        r = raw[raw["_TIER"].eq(tier) & raw["LOGIN"].eq("YES") & raw["STATUS"].eq("ACTIVE")]
-        g_up = r["GROUP"].astype(str).str.upper()
-        if family == "agent":
-            r = r[g_up.str.contains("DP", regex=False, na=False)]
-        else:
-            wd_only = (r"WD\s*ONLY\s*16\s*HOURS\s*-\s*IBANKING", r"WD\s*ONLY\s*16\s*HOURS\s*-\s*PERSONAL\s*EBANKING",
-                       r"WD\s*ONLY\s*24\s*HOURS\s*-\s*IBANKING", r"WD\s*ONLY\s*24\s*HOURS\s*-\s*PERSONAL\s*EBANKING")
-            r = r[g_up.str.contains(family.upper(), regex=False, na=False)
-                  & ~g_up.str.contains("|".join(wd_only), regex=True, na=False)]
-        r = narrow(r, "GROUP", "_H")
+        # ---- REMAINING LIMIT + COUNTS: Limit import, Group contains token AND "DP" and NOT "locked", Login = Yes, Status = Active ----
+        in_group = has(raw["GROUP"], token) & ~has(raw["GROUP"], LOCKED)
+        r = raw[in_group & has(raw["GROUP"], REMAINING_ALSO) & raw["LOGIN"].eq("YES") & raw["STATUS"].eq("ACTIVE")]
+        if family != "agent" and reached:
+            r = r[~r["ACCOUNT"].isin(reached)]
+        r = narrow(r)
 
-        # ---- deposits: same population rules (tier, group code, hours, auto filter) so Limit vs Deposit compare like-for-like ----
-        d = deps[deps["_TIER"].eq(tier)]
-        if family != "agent":
-            d = d[d["DTYPE"].eq(family.upper())]
-        d = narrow(d, "GROUP", "_H")
+        # ---- DEPOSIT: Limit import, Group contains the token and NOT "locked", amount from "Total DP" ----
+        d = raw[in_group]
+        if family != "agent" and reached:
+            d = d[~d["ACCOUNT"].isin(reached)]
+        d = narrow(d)
 
-        shown = list(wallets)
         rows = []
-        for w in shown:
+        for w in wallets:
             rows.append({
                 "WALLET": w,
                 "LIMIT": float(pop.loc[pop["WALLET"].eq(w), "MRC DP LIMIT"].sum()),
                 "Remaining Limit": float(r.loc[r["WALLET"].eq(w), "REMAINING_DP"].sum()),
                 "Counts": int(r["WALLET"].eq(w).sum()),
-                "DEPOSIT": float(d.loc[d["WALLET"].eq(w), "AMOUNT"].sum()),
+                "DEPOSIT": float(d.loc[d["WALLET"].eq(w), "TOTAL_DP"].sum()),
             })
         df = pd.DataFrame(rows, columns=["WALLET", "LIMIT", "Remaining Limit", "Counts", "DEPOSIT"])
         total = {"WALLET": "TOTAL", "Counts": int(df["Counts"].sum())}
@@ -311,13 +311,80 @@ def build(logic: BusinessLogic, state: dict, now: datetime | None = None) -> dic
     for k in TABLE_KEYS:
         tables[k], options[k] = table(k)
 
-    # chart: agent wallets, Limit follows the current view (Normal + VIP), Deposit unchanged
+    # chart: agent wallets, Limit and Deposit follow the current tables (Normal + VIP)
     chart = []
     for w in AGENT_WALLETS:
-        lim = sum(float(tables[k].loc[tables[k]["WALLET"].eq(w), "LIMIT"].sum()) for k in ("agent_normal", "agent_vip"))
-        chart.append({"wallet": w, "Limit": lim, "Deposit": sum(float(tables[k].loc[tables[k]["WALLET"].eq(w), "DEPOSIT"].sum()) for k in ("agent_normal", "agent_vip"))})
+        chart.append({
+            "wallet": w,
+            "Limit": sum(float(tables[k].loc[tables[k]["WALLET"].eq(w), "LIMIT"].sum()) for k in ("agent_normal", "agent_vip")),
+            "Deposit": sum(float(tables[k].loc[tables[k]["WALLET"].eq(w), "DEPOSIT"].sum()) for k in ("agent_normal", "agent_vip")),
+        })
 
     return {"tables": tables, "options": options, "chart": chart, "info": view_info(state, now)}
+
+
+def audit(logic: BusinessLogic, state: dict | None = None, now: datetime | None = None) -> dict:
+    """Read-only diagnostics for the Group rules (no UI; exposed as an API endpoint).
+
+    * unmatched_groups: Group names (Limit import and master) that contain none of the six tokens, flagged when
+      they are "locked".  These are not counted anywhere.
+    * overlapping_groups: Group names that match more than one table (would be double counted).
+    * tables: per table, raw vs master population, so a Remaining Limit above LIMIT can be explained
+      (accounts only in the Limit import, duplicate accounts, accounts above their own DP limit).
+    """
+    master, raw = _prep_master(logic), _prep_raw(logic)
+    reached = set(logic.data.monthly_reached_names())
+
+    def membership(groups: pd.Series) -> pd.DataFrame:
+        return pd.DataFrame({k: has(groups, t) for k, t in TABLE_TOKENS.items()}, index=groups.index)
+
+    def summarise(df, col, extra):
+        if df.empty:
+            return []
+        mem = membership(df[col])
+        n = mem.sum(axis=1)
+        out = []
+        for flag, sel in (("matches no table", n.eq(0)), ("matches several tables", n.gt(1))):
+            bad = df[sel]
+            for g, cnt in bad.groupby(col).size().sort_values(ascending=False).items():
+                out.append({"issue": flag, "group": g or "(blank)", "rows": int(cnt),
+                            "locked": bool(has(pd.Series([g]), LOCKED).iloc[0]), **extra(bad[bad[col].eq(g)])})
+        return out
+
+    lim_extra = lambda d: {"login_yes_active": int((d["LOGIN"].eq("YES") & d["STATUS"].eq("ACTIVE")).sum()),
+                           "total_dp": float(d["TOTAL_DP"].sum())}
+    mas_extra = lambda d: {"mrc_dp_limit": float(d["MRC DP LIMIT"].sum())}
+    result = {"groups_to_review": {"limit": summarise(raw, "GROUP", lim_extra),
+                                   "master": summarise(master, "GROUP CODE", mas_extra)},
+              "tables": {}}
+    master_names = set(master["WALLETNAME"].astype(str).str.strip().str.upper()) if not master.empty else set()
+    mlimit = (master.assign(_K=master["WALLETNAME"].astype(str).str.strip().str.upper())
+              .drop_duplicates("_K").set_index("_K")["MRC DP LIMIT"]) if not master.empty else pd.Series(dtype=float)
+    for key, token in TABLE_TOKENS.items():
+        family = key.rsplit("_", 1)[0]
+        in_g = (has(raw["GROUP"], token) & ~has(raw["GROUP"], LOCKED)) if not raw.empty else pd.Series(dtype=bool)
+        r = raw[in_g & has(raw["GROUP"], REMAINING_ALSO) & raw["LOGIN"].eq("YES") & raw["STATUS"].eq("ACTIVE")] if not raw.empty else raw
+        p = master[has(master["GROUP CODE"], token) & ~has(master["GROUP CODE"], LOCKED)] if not master.empty else master
+        if family != "agent" and reached:
+            r, p = r[~r["ACCOUNT"].isin(reached)], p[~p["WALLETNAME"].astype(str).str.strip().str.upper().isin(reached)]
+        pnames = set(p["WALLETNAME"].astype(str).str.strip().str.upper())
+        dup = r["ACCOUNT"].duplicated(keep=False)
+        own = r["ACCOUNT"].map(mlimit)
+        over = r[own.notna() & (r["REMAINING_DP"] > own)]
+        result["tables"][key] = {
+            "token": token,
+            "limit_rows_login_active": int(len(r)), "master_rows": int(len(p)),
+            "remaining_total": float(r["REMAINING_DP"].sum()), "limit_total": float(p["MRC DP LIMIT"].sum()),
+            "deposit_total_dp": float(raw.loc[in_g, "TOTAL_DP"].sum()) if not raw.empty else 0.0,
+            "remaining_gt_limit": bool(r["REMAINING_DP"].sum() > p["MRC DP LIMIT"].sum()),
+            "limit_accounts_not_in_this_master_group": int((~r["ACCOUNT"].isin(pnames)).sum()),
+            "remaining_of_those": float(r.loc[~r["ACCOUNT"].isin(pnames), "REMAINING_DP"].sum()),
+            "not_in_master_at_all": int((~r["ACCOUNT"].isin(master_names)).sum()),
+            "duplicate_account_rows": int(dup.sum()), "remaining_of_duplicates": float(r.loc[dup, "REMAINING_DP"].sum()),
+            "accounts_remaining_above_own_limit": int(len(over)),
+            "excess_over_own_limit": float((over["REMAINING_DP"] - own[over.index]).sum()),
+        }
+    return result
 
 
 def filter_summary(state: dict, key: str) -> str:

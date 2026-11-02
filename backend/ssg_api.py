@@ -42,7 +42,7 @@ UTIL_VIEW = UV.UtilizationView(DATA_DIR / "utilization_view.json")
 LOGIC.util_view = UTIL_VIEW  # shared view: the Telegram report sends exactly what the Command Center shows
 
 DATASETS = ["Deposit History", "Pay Out History", "Account Statement", "Active Accounts", "Locked Accounts",
-            "Disabled Accounts", "Opening", "Limit", "Settlement / Top up"]
+            "Disabled Accounts", "Opening", "Limit", "Settlement / Top up", "Monthly Limit"]
 DATASET_LABELS = {d: d for d in DATASETS}
 DATASET_LABELS["Settlement / Top up"] = "Settlement / Top Up"
 # upload form field -> dataset name (same field names the original app used)
@@ -52,6 +52,7 @@ UPLOAD_FIELDS = {
     "locked_accounts": "Locked Accounts", "disabled_accounts": "Disabled Accounts",
     "opening": "Opening", "limit_file": "Limit", "settlement_topup": "Settlement / Top up",
     "wallet_master": "Wallet Account Master List", "permanently_closed": "Permanently Closed Accounts",
+    "monthly_limit": "Monthly Limit",
 }
 CLEAR_PERM = {"Active Accounts": "imports_active", "Locked Accounts": "imports_locked", "Disabled Accounts": "imports_disabled"}
 
@@ -182,6 +183,13 @@ def command_center(user: User = Depends(perm("dashboard"))):
     }
 
 
+@router.get("/dashboard/utilization-audit")
+def utilization_audit(user: User = Depends(perm("dashboard"))):
+    """Diagnostics for the fixed Group rules: Group names that match none of the six tables, and
+    why Remaining Limit can exceed LIMIT.  API only - not shown in the UI."""
+    return UV.audit(LOGIC, UTIL_VIEW.get())
+
+
 class UtilViewIn(BaseModel):
     tables: Optional[dict] = None          # {table_key: {group_code: [], wallet: [], hours: []}}
     auto_enabled: Optional[bool] = None    # False = manual stop (count all hours)
@@ -217,12 +225,14 @@ def _cih_wallet_payload(personal: bool):
     wallets = ["BKASHC", "NAGADC", "ROCKETC", "UPAYC"] if personal else ["BKASH", "NAGAD", "ROCKET", "UPAY"]
     df = LOGIC._cih_wallet_table(personal)
     df = df[df["Wallet Name"].isin(wallets)].copy()
-    counts = [LOGIC._cih_count_table(personal, False), LOGIC._cih_count_table(personal, True)]
+    counts = [LOGIC._cih_count_table(personal, False, "NORMAL"), LOGIC._cih_count_table(personal, True, "NORMAL"),
+              LOGIC._cih_count_table(personal, False, "VIP"), LOGIC._cih_count_table(personal, True, "VIP")]
     kind = "PERSONAL" if personal else "AGENT"
     cards = [{"wallet": r["Wallet Name"], "system_balance": _clean(r["System Balance"])} for r in df.to_dict("records")]
     table = pack(with_total(df, "Wallet Name"), list(df.columns[1:]))
     count_tables = []
-    titles = [f"COUNTS OF {kind} WALLET BALANCES WITH", f"COUNTS OF {kind} OPEN IN WITHDRAWAL WITH"]
+    titles = [f"COUNTS OF {kind} WALLET BALANCES WITH (NORMAL)", f"COUNTS OF {kind} OPEN IN WITHDRAWAL WITH (NORMAL)",
+              f"COUNTS OF {kind} WALLET BALANCES WITH (VIP)", f"COUNTS OF {kind} OPEN IN WITHDRAWAL WITH (VIP)"]
     for title, cdf in zip(titles, counts):
         cols = list(cdf.columns[1:]) if cdf is not None and not cdf.empty else []
         count_tables.append({"title": title, "table": {**pack(with_total(cdf, "Wallets") if cdf is not None else cdf, []),
@@ -273,6 +283,56 @@ def cih_limit_availability(personal_mode: str = "daily", user: User = Depends(pe
         "personal_count": t(d["personal_count"]), "personal_count_total": t(d["personal_count_total"]),
         "overall_agent": _clean(d["overall_agent"]), "overall_personal": _clean(overall_personal),
     }
+
+
+# ------------------------------------------------------------ monthly limit ---
+
+def _monthly_frame(q: str = "", wallet: list[str] = (), view: str = "reached") -> pd.DataFrame:
+    from ssg.logic_core import MONTHLY_LIMIT_THRESHOLD, MONTHLY_STATUS
+    src = DATA.dataframes.get("Monthly Limit")
+    cols = ["ACCOUNT", "WALLET", "TOTAL DP", "MONTHLY LIMIT", "REMAINING", "USED %", "LIMIT STATUS"]
+    if src is None or src.empty:
+        return pd.DataFrame(columns=cols)
+    total = pd.to_numeric(src["Total DP Amount"], errors="coerce").fillna(0.0)
+    df = pd.DataFrame({
+        "ACCOUNT": src["Account Name"], "WALLET": src["Bankcode"], "TOTAL DP": total,
+        "MONTHLY LIMIT": MONTHLY_LIMIT_THRESHOLD,
+        "REMAINING": (MONTHLY_LIMIT_THRESHOLD - total).clip(lower=0),
+        "USED %": (total / MONTHLY_LIMIT_THRESHOLD * 100).round(1),
+    })
+    df["LIMIT STATUS"] = df["TOTAL DP"].map(lambda v: MONTHLY_STATUS if v >= MONTHLY_LIMIT_THRESHOLD else "Within Limit")
+    if view != "all":
+        df = df[df["LIMIT STATUS"].eq(MONTHLY_STATUS)]
+    if wallet:
+        df = df[df["WALLET"].isin(wallet)]
+    df = df[F._contains_any_terms(df["ACCOUNT"], q)] if q else df
+    return df.sort_values("TOTAL DP", ascending=False).reset_index(drop=True)[cols]
+
+
+@router.get("/monthly-limit")
+def monthly_limit(q: str = "", wallet: list[str] = Query(default=[]), view: str = "reached", page: int = 1, per_page: int = 25,
+                  user: User = Depends(perm("monitoring_personal"))):
+    from ssg.logic_core import MONTHLY_LIMIT_THRESHOLD, MONTHLY_PERSONAL_BANKS
+    part = _monthly_frame(q, wallet, view)
+    page_df, meta = paginate(part, page, per_page)
+    tbl = pack(page_df, ["TOTAL DP", "MONTHLY LIMIT", "REMAINING"])
+    src = DATA.dataframes.get("Monthly Limit")
+    uploaded = 0 if src is None else len(src)
+    reached = DATA.monthly_reached_names()
+    by_wallet = {w: 0 for w in MONTHLY_PERSONAL_BANKS}
+    if src is not None and not src.empty:
+        for w, n in src[src["Account Name"].isin(reached)].groupby("Bankcode").size().items():
+            by_wallet[w] = int(n)
+    loaded = DATA.monthly_limit_loaded_at
+    return {**tbl, **meta, "options": {"wallet": MONTHLY_PERSONAL_BANKS},
+            "kpis": {"threshold": MONTHLY_LIMIT_THRESHOLD, "uploaded": uploaded, "reached": len(reached), "by_wallet": by_wallet,
+                     "loaded_at": loaded.strftime("%d %b %Y, %H:%M") if loaded else ""}}
+
+
+@router.get("/export/monthly-limit")
+def export_monthly_limit(q: str = "", wallet: list[str] = Query(default=[]), view: str = "reached",
+                         user: User = Depends(perm("monitoring_personal"))):
+    return export_xlsx(_monthly_frame(q, wallet, view), "monthly_limit")
 
 
 # ---------------------------------------------------- monitoring / overview ---
@@ -417,7 +477,7 @@ async def import_files(
     locked_accounts: UploadFile | None = File(None), disabled_accounts: UploadFile | None = File(None),
     opening: UploadFile | None = File(None), limit_file: UploadFile | None = File(None),
     settlement_topup: UploadFile | None = File(None), wallet_master: UploadFile | None = File(None),
-    permanently_closed: UploadFile | None = File(None),
+    permanently_closed: UploadFile | None = File(None), monthly_limit: UploadFile | None = File(None),
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     from auth import user_permissions
@@ -432,7 +492,7 @@ async def import_files(
              "account_statement": account_statement, "active_accounts": active_accounts,
              "locked_accounts": locked_accounts, "disabled_accounts": disabled_accounts, "opening": opening,
              "limit_file": limit_file, "settlement_topup": settlement_topup, "wallet_master": wallet_master,
-             "permanently_closed": permanently_closed}
+             "permanently_closed": permanently_closed, "monthly_limit": monthly_limit}
     imported, errors = [], []
     any_file = False
     for field, up in given.items():
@@ -458,6 +518,8 @@ async def import_files(
                 cdf = pd.read_csv(tmp, dtype=str, keep_default_na=False) if ext == ".csv" else pd.read_excel(
                     tmp, engine="openpyxl" if ext == ".xlsx" else "xlrd", dtype=str)
                 msg, ok = DATA.merge_closed_dataframe(cdf), True
+            elif dataset == "Monthly Limit":
+                ok, msg = DATA.load_monthly_limit(str(tmp))  # personal accounts only; own store, keeps Extended Opening untouched
             else:
                 ok, msg = DATA.load_file(dataset, str(tmp))
             (imported if ok else errors).append(f"{label} ({msg} rows)" if ok else f"{label}: {msg}")

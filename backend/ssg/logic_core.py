@@ -14,7 +14,24 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 WALLET_MASTER_STORE = DATA_DIR / "wallet_account_master.csv"
 PERMANENTLY_CLOSED_STORE = DATA_DIR / "permanently_closed_accounts.csv"
 PENDING_ACCOUNTS_STORE = DATA_DIR / "pending_accounts.csv"
+MONTHLY_LIMIT_STORE = DATA_DIR / "monthly_limit.csv"
+MONTHLY_LIMIT_THRESHOLD = 297000.0          # personal accounts only: Total DP >= this => monthly limit reached
+MONTHLY_PERSONAL_BANKS = ["BKASHC", "NAGADC", "ROCKETC", "UPAYC"]
+MONTHLY_STATUS = "Monthly Reach Limit"
 MONITOR_COLUMNS = ["ACT SDP","MRC LMT","DP Bal Limit","ACCOUNTS","OPENING","DEPOSIT","WITHDRAWAL","ADJUSTMENT","R. BAL","A. BAL","DISCREP","STATUS","CODE","W. HRS","WALLET","LIMIT STATUS","ACCT TYPE","TAGS","REMARKS"]
+
+_XML_ESC_RE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def clean_group_label(value) -> str:
+    """Group code as it should be shown/stored: decodes Excel's "_x0009_" style escapes (a TAB the source
+    system left inside the group name, which Excel writes out as the literal text "_x0009_") and trims /
+    collapses whitespace.  "Fully Locked-No Transactions_x0009_" -> "Fully Locked-No Transactions"."""
+    text = _XML_ESC_RE.sub(lambda m: chr(int(m.group(1), 16)), str(value if value is not None else ""))
+    if text.strip().lower() in {"nan", "none"}:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
 
 class AppData:
     """Stores imported datasets and the persistent Wallet Account Master List."""
@@ -57,9 +74,91 @@ class AppData:
         self._load_persistent_master()
         self._load_persistent_closed()
         self._load_pending_decisions()
+        self.monthly_limit_loaded_at = None
+        self._monthly_reached = frozenset()
+        self._load_persistent_monthly()
 
     def _touch_data(self):
         self.data_revision += 1
+
+    # ---------------- Monthly Limit (personal accounts only) ----------------
+    MONTHLY_COLUMNS = ["Bankcode", "Account Name", "Total DP Amount"]
+
+    @classmethod
+    def _parse_monthly_frame(cls, df):
+        """Keep Bankcode / Account Name / Total DP Amount, personal bank codes only, one row per account.
+        Duplicate account rows (the export often repeats an account with 0) -> the highest Total DP Amount wins."""
+        if df is None or df.empty:
+            raise ValueError("The Monthly Limit file is empty.")
+        lookup = {re.sub(r"[^a-z0-9]", "", str(c).lower()): c for c in df.columns}
+        def col(*names):
+            for n in names:
+                if n in lookup:
+                    return lookup[n]
+            return None
+        bank = col("bankcode", "bank")
+        acct = col("accountname", "account")
+        amount = col("totaldpamount", "totaldp")
+        missing = [n for n, c in (("Bankcode", bank), ("Account Name", acct), ("Total DP Amount", amount)) if c is None]
+        if missing:
+            raise ValueError("Monthly Limit file is missing column(s): " + ", ".join(missing))
+        out = pd.DataFrame({
+            "Bankcode": df[bank].astype(str).str.strip().str.upper(),
+            "Account Name": df[acct].astype(str).str.strip().str.upper(),
+            "Total DP Amount": pd.to_numeric(df[amount].astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce").fillna(0.0),
+        })
+        out = out[out["Bankcode"].isin(MONTHLY_PERSONAL_BANKS) & out["Account Name"].ne("") & out["Account Name"].ne("NAN")]
+        out = out.sort_values("Total DP Amount", ascending=False).drop_duplicates("Account Name", keep="first")
+        return out.sort_values(["Bankcode", "Account Name"]).reset_index(drop=True)
+
+    def _set_monthly(self, frame, loaded_at):
+        self.dataframes["Monthly Limit"] = frame
+        self.monthly_limit_loaded_at = loaded_at
+        self._monthly_reached = frozenset(frame.loc[frame["Total DP Amount"] >= MONTHLY_LIMIT_THRESHOLD, "Account Name"])
+        self._touch_data()
+
+    def _load_persistent_monthly(self):
+        try:
+            if MONTHLY_LIMIT_STORE.exists():
+                from datetime import datetime as _dt
+                frame = self._parse_monthly_frame(pd.read_csv(MONTHLY_LIMIT_STORE, dtype=str, keep_default_na=False))
+                self._set_monthly(frame, _dt.fromtimestamp(MONTHLY_LIMIT_STORE.stat().st_mtime))
+        except Exception:
+            pass
+
+    def load_monthly_limit(self, file_path):
+        """Import the monthly limit export. Replaces the previous monthly data (it is a running month-to-date total)."""
+        from datetime import datetime as _dt
+        ext = Path(file_path).suffix.lower()
+        try:
+            if ext == ".csv":
+                raw = pd.read_csv(file_path, dtype=str)
+            elif ext == ".xls":
+                raw = pd.read_excel(file_path, engine="xlrd", dtype=str)
+            elif ext == ".xlsx":
+                raw = pd.read_excel(file_path, engine="openpyxl", dtype=str)
+            else:
+                raise ValueError("Unsupported file format. Please use CSV or Excel (.xlsx/.xls).")
+            frame = self._parse_monthly_frame(raw)
+            frame.to_csv(MONTHLY_LIMIT_STORE, index=False, encoding="utf-8-sig")
+            self._set_monthly(frame, _dt.now())
+            return True, len(frame)
+        except Exception as e:
+            return False, str(e)
+
+    def clear_monthly_limit(self):
+        self.dataframes.pop("Monthly Limit", None)
+        self.monthly_limit_loaded_at = None
+        self._monthly_reached = frozenset()
+        try:
+            MONTHLY_LIMIT_STORE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._touch_data()
+
+    def monthly_reached_names(self):
+        """Upper-case account names of personal accounts whose monthly Total DP reached the limit."""
+        return self._monthly_reached
 
     def _touch_summary(self):
         self.summary_revision += 1
@@ -95,6 +194,7 @@ class AppData:
                 return "EBANKING"
             return text.upper() if text else ""
         result["METHOD"] = result["METHOD"].map(_normalise_method)
+        result["GROUP CODE"] = result["GROUP CODE"].map(clean_group_label)
         result = result[(result["WALLETNAME"] != "") & (result["WALLETNAME"] != "NAN")]
         result = result.drop_duplicates(subset=["WALLETNAME"], keep="last").reset_index(drop=True)
         return result
@@ -306,6 +406,9 @@ class AppData:
         self.extended_opening_map = {}
 
     def clear_dataset(self, dataset_name):
+        if dataset_name == "Monthly Limit":
+            self.clear_monthly_limit()
+            return
         self.reset_extended_opening()
         if dataset_name == "Wallet Account Master List":
             self._load_persistent_master()
@@ -681,7 +784,7 @@ class BusinessLogic:
         out["A. BAL"] = source[balance_col].apply(self._number) if balance_col else 0.0
         login = source[login_col].astype(str).str.strip().str.lower() if login_col else pd.Series("", index=source.index)
         out["STATUS"] = login.map({"yes": "🟢 Log In", "no": "🔴 Log Out"}).fillna("")
-        out["CODE"] = source[group_col].fillna("").astype(str).str.strip() if group_col else ""
+        out["CODE"] = source[group_col].map(clean_group_label) if group_col else ""
         out["GROUP CODE"] = out["CODE"]
         out["WALLET"] = source[bank_col].fillna("").astype(str).str.strip().str.upper() if bank_col else ""
         out["LIMIT STATUS"] = source[limit_status_col].fillna("").astype(str).str.strip() if limit_status_col else ""
@@ -1067,6 +1170,11 @@ class BusinessLogic:
                 return 'IBANKING'
             if 'EBANKING' in text or 'EBANK' in text:
                 return 'EBANKING'
+            # New group codes: "NORMAL IB ...", "VIP EB ..." (EB / IB as a separate word)
+            if re.search(r'(?<![A-Z0-9])IB(?![A-Z0-9])', text):
+                return 'IBANKING'
+            if re.search(r'(?<![A-Z0-9])EB(?![A-Z0-9])', text):
+                return 'EBANKING'
             return ''
 
         def infer_hours_from_group(value):
@@ -1198,6 +1306,11 @@ class BusinessLogic:
         out.loc[locked_mask, "LIMIT STATUS"] = "Locked Account"
         out["LIMIT STATUS"] = out["LIMIT STATUS"].astype(str).replace({"nan":"", "None":""}).where(lambda s:s.str.strip().ne(""), "Locked")
         out["ACCT TYPE"] = master["ACCOUNT TYPE"]
+        # Monthly limit (personal accounts only): reached accounts show "Monthly Reach Limit"
+        reached = self.data.monthly_reached_names()
+        if reached:
+            is_personal = out["ACCT TYPE"].astype(str).str.upper().str.contains("PERSONAL", na=False)
+            out.loc[is_personal & out["ACCOUNTS"].astype(str).str.strip().str.upper().isin(reached), "LIMIT STATUS"] = MONTHLY_STATUS
         out["TAGS"] = master["WALLETNAME"].map(lambda x: tags.get(str(x).upper(), ""))
         out["REMARKS"] = master["WALLETNAME"].map(lambda x: remarks.get(str(x).upper(), ""))
 
@@ -1436,35 +1549,51 @@ class BusinessLogic:
             })
         return self._store_cache(cache_key, pd.DataFrame(rows))
 
-    def _cih_count_table(self, personal=False, withdrawal=False):
-        cache_key = f"cih_count_{'personal' if personal else 'agent'}_{'wd' if withdrawal else 'balance'}"
+    # Group-code keywords of the CIH wallet-balance count tables (case-insensitive "contains" rules)
+    CIH_COUNT_TOKENS = {
+        ("agent", "NORMAL"): ["NORMAL AG"], ("personal", "NORMAL"): ["NORMAL EB", "NORMAL IB"],
+        ("agent", "VIP"): ["VIP AG"], ("personal", "VIP"): ["VIP EB", "VIP IB"],
+    }
+
+    def _cih_count_table(self, personal=False, withdrawal=False, tier=None):
+        """Counts of wallet balances (or of balances open in withdrawal) per amount range, from the Limit import.
+
+        tier "NORMAL" / "VIP" (None = both).  Rules:
+          * Group contains NORMAL AG (agent) / NORMAL EB or NORMAL IB (personal); VIP AG / VIP EB or VIP IB for VIP
+          * "open in withdrawal": the Group must also contain "WD"
+          * Balance ranges: <= 25,000 | > 25,000 and <= 50,000 | > 50,000 and <= 100,000 | > 100,000
+          * Login = Yes and Status = Active
+        """
+        cache_key = f"cih_count_{'personal' if personal else 'agent'}_{'wd' if withdrawal else 'balance'}_{tier or 'all'}"
         cached = self._cached(cache_key)
         if cached is not None:
             return cached.copy()
         wallets = ["BKASHC", "NAGADC", "ROCKETC", "UPAYC"] if personal else ["BKASH", "NAGAD", "ROCKET", "UPAY"]
+        kind = "personal" if personal else "agent"
+        tiers = [tier] if tier else ["NORMAL", "VIP"]
+        tokens = [t for x in tiers for t in self.CIH_COUNT_TOKENS[(kind, x)]]
         limit = self._cih_limit_rows()
         rows = []
         for wallet in wallets:
             if not limit.empty:
-                part = limit[limit["WALLET"].eq(wallet)].copy()
+                part = limit[limit["WALLET"].eq(wallet)]
+                g = part["GROUP"].map(lambda v: clean_group_label(v).casefold())
+                in_group = pd.Series(False, index=part.index)
+                for t in tokens:
+                    in_group |= g.str.contains(t.casefold(), regex=False)
+                if withdrawal:
+                    in_group &= g.str.contains("wd", regex=False)
                 login_yes = part["LOGIN"].astype(str).str.strip().str.upper().eq("YES")
                 active = part["STATUS"].astype(str).str.strip().str.upper().eq("ACTIVE")
-                group_upper = part["GROUP"].astype(str).str.strip().str.upper()
-                if withdrawal:
-                    group_mask = (group_upper.str.contains("BANKING", regex=False, na=False) if personal
-                                  else group_upper.str.contains("WD", regex=False, na=False))
-                    mask = login_yes & active & group_mask
-                else:
-                    mask = login_yes & active
-                vals = pd.to_numeric(part.loc[mask, "BALANCE"].astype(str).str.replace(",","",regex=False), errors="coerce").fillna(0)
+                vals = pd.to_numeric(part.loc[in_group & login_yes & active, "BALANCE"], errors="coerce").fillna(0)
             else:
                 vals = pd.Series(dtype=float)
             rows.append({
                 "Wallets": wallet,
-                "<25k": int((vals < 25000).sum()),
-                "25k+": int(((vals >= 25000) & (vals < 50000)).sum()),
-                "50k+": int(((vals >= 50000) & (vals < 100000)).sum()),
-                "100k+": int((vals >= 100000).sum()),
+                "<25k": int((vals <= 25000).sum()),
+                "25k+": int(((vals > 25000) & (vals <= 50000)).sum()),
+                "50k+": int(((vals > 50000) & (vals <= 100000)).sum()),
+                "100k+": int((vals > 100000).sum()),
             })
         return self._store_cache(cache_key, pd.DataFrame(rows))
 

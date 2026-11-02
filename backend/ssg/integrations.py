@@ -573,35 +573,47 @@ class IntegrationManager:
             return out
         if report_name == "cih-agent":
             df=self.logic._cih_wallet_table(False).copy()
-            counts_balance=self.logic._cih_count_table(False,False).copy()
-            counts_wd=self.logic._cih_count_table(False,True).copy()
+            tiers={}
+            for tier in ("NORMAL","VIP"):
+                pair=[]
+                for wd in (False,True):
+                    t=self.logic._cih_count_table(False,wd,tier).copy()
+                    if not t.empty: t=pd.concat([t,self.logic._cih_total_row(t,"Wallets")],ignore_index=True)
+                    pair.append(t)
+                tiers[tier]=pair
             wallets=["BKASH","NAGAD","ROCKET","UPAY"]
             df=df[df["Wallet Name"].isin(wallets)].copy()
             cards=df[["Wallet Name","System Balance"]].copy()
             if not df.empty: df_total=self.logic._cih_total_row(df,"Wallet Name"); df=pd.concat([df,df_total],ignore_index=True)
-            if not counts_balance.empty: counts_balance=pd.concat([counts_balance,self.logic._cih_total_row(counts_balance,"Wallets")],ignore_index=True)
-            if not counts_wd.empty: counts_wd=pd.concat([counts_wd,self.logic._cih_total_row(counts_wd,"Wallets")],ignore_index=True)
             return {
                 "CURRENT AGENT WALLET BALANCES":cards,
                 "AGENT WALLET BALANCES":df,
-                "COUNTS OF AGENT WALLET BALANCES WITH":counts_balance,
-                "COUNTS OF AGENT OPEN IN WITHDRAWAL WITH":counts_wd,
+                "COUNTS OF AGENT WALLET BALANCES WITH (NORMAL)":tiers["NORMAL"][0],
+                "COUNTS OF AGENT OPEN IN WITHDRAWAL WITH (NORMAL)":tiers["NORMAL"][1],
+                "COUNTS OF AGENT WALLET BALANCES WITH (VIP)":tiers["VIP"][0],
+                "COUNTS OF AGENT OPEN IN WITHDRAWAL WITH (VIP)":tiers["VIP"][1],
             }
         if report_name == "cih-personal":
             df=self.logic._cih_wallet_table(True).copy()
-            counts_balance=self.logic._cih_count_table(True,False).copy()
-            counts_wd=self.logic._cih_count_table(True,True).copy()
+            tiers={}
+            for tier in ("NORMAL","VIP"):
+                pair=[]
+                for wd in (False,True):
+                    t=self.logic._cih_count_table(True,wd,tier).copy()
+                    if not t.empty: t=pd.concat([t,self.logic._cih_total_row(t,"Wallets")],ignore_index=True)
+                    pair.append(t)
+                tiers[tier]=pair
             wallets=["BKASHC","NAGADC","ROCKETC","UPAYC"]
             df=df[df["Wallet Name"].isin(wallets)].copy()
             cards=df[["Wallet Name","System Balance"]].copy()
             if not df.empty: df_total=self.logic._cih_total_row(df,"Wallet Name"); df=pd.concat([df,df_total],ignore_index=True)
-            if not counts_balance.empty: counts_balance=pd.concat([counts_balance,self.logic._cih_total_row(counts_balance,"Wallets")],ignore_index=True)
-            if not counts_wd.empty: counts_wd=pd.concat([counts_wd,self.logic._cih_total_row(counts_wd,"Wallets")],ignore_index=True)
             return {
                 "CURRENT PERSONAL WALLET BALANCES":cards,
                 "PERSONAL WALLET BALANCES":df,
-                "COUNTS OF PERSONAL WALLET BALANCES WITH":counts_balance,
-                "COUNTS OF PERSONAL OPEN IN WITHDRAWAL WITH":counts_wd,
+                "COUNTS OF PERSONAL WALLET BALANCES WITH (NORMAL)":tiers["NORMAL"][0],
+                "COUNTS OF PERSONAL OPEN IN WITHDRAWAL WITH (NORMAL)":tiers["NORMAL"][1],
+                "COUNTS OF PERSONAL WALLET BALANCES WITH (VIP)":tiers["VIP"][0],
+                "COUNTS OF PERSONAL OPEN IN WITHDRAWAL WITH (VIP)":tiers["VIP"][1],
             }
         if report_name == "limit-availability":
             d=self.logic.cih_limit_availability()
