@@ -82,7 +82,7 @@ class AppData:
         self.data_revision += 1
 
     # ---------------- Monthly Limit (personal accounts only) ----------------
-    MONTHLY_COLUMNS = ["Bankcode", "Account Name", "Total DP Amount"]
+    MONTHLY_COLUMNS = ["Bankcode", "Account Name", "Total DP Amount", "Total WP Amount"]
 
     @classmethod
     def _parse_monthly_frame(cls, df):
@@ -99,6 +99,7 @@ class AppData:
         bank = col("bankcode", "bank")
         acct = col("accountname", "account")
         amount = col("totaldpamount", "totaldp")
+        wp_amount = col("totalwpamount", "totalwp")  # optional: files saved before the withdrawal column existed still load (WP = 0)
         missing = [n for n, c in (("Bankcode", bank), ("Account Name", acct), ("Total DP Amount", amount)) if c is None]
         if missing:
             raise ValueError("Monthly Limit file is missing column(s): " + ", ".join(missing))
@@ -106,9 +107,14 @@ class AppData:
             "Bankcode": df[bank].astype(str).str.strip().str.upper(),
             "Account Name": df[acct].astype(str).str.strip().str.upper(),
             "Total DP Amount": pd.to_numeric(df[amount].astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce").fillna(0.0),
+            "Total WP Amount": (pd.to_numeric(df[wp_amount].astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce").fillna(0.0)
+                                if wp_amount is not None else 0.0),
         })
         out = out[out["Bankcode"].isin(MONTHLY_PERSONAL_BANKS) & out["Account Name"].ne("") & out["Account Name"].ne("NAN")]
+        # one row per account: the highest Total DP wins (unchanged rule); Total WP takes the highest value of the repeats too
+        wp_max = out.groupby("Account Name")["Total WP Amount"].transform("max")
         out = out.sort_values("Total DP Amount", ascending=False).drop_duplicates("Account Name", keep="first")
+        out["Total WP Amount"] = wp_max.reindex(out.index)
         return out.sort_values(["Bankcode", "Account Name"]).reset_index(drop=True)
 
     def _set_monthly(self, frame, loaded_at):
@@ -490,6 +496,11 @@ class AppData:
 
     def export_master_template(self, file_path):
         pd.DataFrame(columns=self.MASTER_COLUMNS).to_excel(file_path, index=False, engine="openpyxl")
+        return file_path
+
+    def export_monthly_limit_template(self, file_path):
+        """Blank Monthly Limit import template -- exactly the columns the Monthly Limit import reads."""
+        pd.DataFrame(columns=self.MONTHLY_COLUMNS).to_excel(file_path, index=False, engine="openpyxl")
         return file_path
 
     def export_opening_template(self, file_path):

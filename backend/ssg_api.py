@@ -287,20 +287,55 @@ def cih_limit_availability(personal_mode: str = "daily", user: User = Depends(pe
 
 # ------------------------------------------------------------ monthly limit ---
 
+def _monthly_balances() -> pd.DataFrame:
+    """Running / actual balance of every Personal Account (Account Monitoring -> Personal Accounts), keyed by
+    upper-case Bank Code + Account Name; used to enrich the Monthly Limit table."""
+    try:
+        mon = LOGIC.build_account_monitoring_dataframe()
+    except Exception:  # noqa: BLE001
+        mon = None
+    cols = ["_WALLET", "_ACCOUNT", "R. BAL", "A. BAL"]
+    if mon is None or mon.empty or not {"ACCOUNTS", "WALLET", "R. BAL", "A. BAL", "_TYPE"} <= set(mon.columns):
+        return pd.DataFrame(columns=cols)
+    mon = mon[mon["_TYPE"].eq("Personal Accounts")]
+    out = pd.DataFrame({
+        "_WALLET": mon["WALLET"].astype(str).str.strip().str.upper(),
+        "_ACCOUNT": mon["ACCOUNTS"].astype(str).str.strip().str.upper(),
+        "R. BAL": pd.to_numeric(mon["R. BAL"], errors="coerce"),
+        "A. BAL": pd.to_numeric(mon["A. BAL"], errors="coerce"),
+    })
+    return out.drop_duplicates(["_WALLET", "_ACCOUNT"], keep="first")[cols]
+
+
 def _monthly_frame(q: str = "", wallet: list[str] = (), view: str = "reached") -> pd.DataFrame:
     from ssg.logic_core import MONTHLY_LIMIT_THRESHOLD, MONTHLY_STATUS
     src = DATA.dataframes.get("Monthly Limit")
-    cols = ["ACCOUNT", "WALLET", "TOTAL DP", "MONTHLY LIMIT", "REMAINING", "USED %", "LIMIT STATUS"]
+    cols = ["ACCOUNT", "WALLET", "TOTAL DP", "TOTAL WP", "R. BAL", "A. BAL", "MONTHLY LIMIT", "REMAINING", "USED %", "LIMIT STATUS"]
     if src is None or src.empty:
         return pd.DataFrame(columns=cols)
     total = pd.to_numeric(src["Total DP Amount"], errors="coerce").fillna(0.0)
+    withdrawal = (pd.to_numeric(src["Total WP Amount"], errors="coerce").fillna(0.0)
+                  if "Total WP Amount" in src.columns else pd.Series(0.0, index=src.index))
     df = pd.DataFrame({
-        "ACCOUNT": src["Account Name"], "WALLET": src["Bankcode"], "TOTAL DP": total,
+        "ACCOUNT": src["Account Name"], "WALLET": src["Bankcode"], "TOTAL DP": total, "TOTAL WP": withdrawal,
         "MONTHLY LIMIT": MONTHLY_LIMIT_THRESHOLD,
         "REMAINING": (MONTHLY_LIMIT_THRESHOLD - total).clip(lower=0),
         "USED %": (total / MONTHLY_LIMIT_THRESHOLD * 100).round(1),
     })
     df["LIMIT STATUS"] = df["TOTAL DP"].map(lambda v: MONTHLY_STATUS if v >= MONTHLY_LIMIT_THRESHOLD else "Within Limit")
+    # balances: match on Bank Code + Account Name; if the bank code differs, fall back to the account name when it is unique
+    bal = _monthly_balances()
+    keys = pd.DataFrame({"_WALLET": df["WALLET"].astype(str).str.strip().str.upper(),
+                         "_ACCOUNT": df["ACCOUNT"].astype(str).str.strip().str.upper()}, index=df.index)
+    merged = keys.merge(bal, on=["_WALLET", "_ACCOUNT"], how="left")
+    merged.index = df.index
+    by_name = bal[~bal["_ACCOUNT"].duplicated(keep=False)].set_index("_ACCOUNT")
+    for c in ("R. BAL", "A. BAL"):
+        miss = merged[c].isna()
+        if miss.any():
+            merged.loc[miss, c] = keys.loc[miss, "_ACCOUNT"].map(by_name[c])
+        df[c] = merged[c]
+    df = df[cols]
     if view != "all":
         df = df[df["LIMIT STATUS"].eq(MONTHLY_STATUS)]
     if wallet:
@@ -315,7 +350,7 @@ def monthly_limit(q: str = "", wallet: list[str] = Query(default=[]), view: str 
     from ssg.logic_core import MONTHLY_LIMIT_THRESHOLD, MONTHLY_PERSONAL_BANKS
     part = _monthly_frame(q, wallet, view)
     page_df, meta = paginate(part, page, per_page)
-    tbl = pack(page_df, ["TOTAL DP", "MONTHLY LIMIT", "REMAINING"])
+    tbl = pack(page_df, ["TOTAL DP", "TOTAL WP", "R. BAL", "A. BAL", "MONTHLY LIMIT", "REMAINING"])
     src = DATA.dataframes.get("Monthly Limit")
     uploaded = 0 if src is None else len(src)
     reached = DATA.monthly_reached_names()
@@ -627,10 +662,11 @@ def sync_google(user: User = Depends(perm("imports_google_sync"))):
 TEMPLATES = {"master": ("Wallet_Account_Master_Template.xlsx", lambda p: DATA.export_master_template(p)),
              "opening": ("Opening_Template.xlsx", lambda p: DATA.export_opening_template(p)),
              "settlement-topup": ("Settlement_Top_Up_Template.xlsx", lambda p: DATA.export_settlement_topup_template(p)),
+             "monthly-limit": ("Monthly_Limit_Template.xlsx", lambda p: DATA.export_monthly_limit_template(p)),
              "closed": ("Permanently_Closed_Accounts_Template.xlsx",
                         lambda p: pd.DataFrame(columns=AppData.CLOSED_COLUMNS).to_excel(p, index=False, engine="openpyxl"))}
 TEMPLATE_PERMS = {"master": "imports_master", "opening": "imports_data", "settlement-topup": "imports_data",
-                  "closed": "imports_closed"}
+                  "monthly-limit": "imports_data", "closed": "imports_closed"}
 
 
 @router.get("/template/{name}")
