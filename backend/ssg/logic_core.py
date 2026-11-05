@@ -1571,8 +1571,11 @@ class BusinessLogic:
 
         tier "NORMAL" / "VIP" (None = both).  Rules:
           * Group contains NORMAL AG (agent) / NORMAL EB or NORMAL IB (personal); VIP AG / VIP EB or VIP IB for VIP
-          * "open in withdrawal": the Group must also contain "WD"
-          * Balance ranges: <= 25,000 | > 25,000 and <= 50,000 | > 50,000 and <= 100,000 | > 100,000
+          * Group Code (whole word, on top of the tier rule): wallet balances -> DP/WD, DP or WD;
+            "open in withdrawal" -> DP/WD or WD
+          * Wallet balances ranges: <= 25,000 | > 25,000 and <= 50,000 | > 50,000 and <= 100,000 | > 100,000
+          * Open in withdrawal ranges (each account in exactly one): < 10,000 | 10,000 to < 25,000 |
+            25,000 to < 50,000 | 50,000 to < 100,000 | >= 100,000
           * Login = Yes and Status = Active
         """
         cache_key = f"cih_count_{'personal' if personal else 'agent'}_{'wd' if withdrawal else 'balance'}_{tier or 'all'}"
@@ -1592,20 +1595,30 @@ class BusinessLogic:
                 in_group = pd.Series(False, index=part.index)
                 for t in tokens:
                     in_group |= g.str.contains(t.casefold(), regex=False)
-                if withdrawal:
-                    in_group &= g.str.contains("wd", regex=False)
+                code_rx = r"(?<![a-z0-9])(?:dp/wd|wd)(?![a-z0-9])" if withdrawal else r"(?<![a-z0-9])(?:dp/wd|dp|wd)(?![a-z0-9])"
+                in_group &= g.str.contains(code_rx, regex=True)
                 login_yes = part["LOGIN"].astype(str).str.strip().str.upper().eq("YES")
                 active = part["STATUS"].astype(str).str.strip().str.upper().eq("ACTIVE")
                 vals = pd.to_numeric(part.loc[in_group & login_yes & active, "BALANCE"], errors="coerce").fillna(0)
             else:
                 vals = pd.Series(dtype=float)
-            rows.append({
-                "Wallets": wallet,
-                "<25k": int((vals <= 25000).sum()),
-                "25k+": int(((vals > 25000) & (vals <= 50000)).sum()),
-                "50k+": int(((vals > 50000) & (vals <= 100000)).sum()),
-                "100k+": int((vals > 100000).sum()),
-            })
+            if withdrawal:
+                rows.append({
+                    "Wallets": wallet,
+                    "<10K": int((vals < 10000).sum()),
+                    "10K\u2013<25K": int(((vals >= 10000) & (vals < 25000)).sum()),
+                    "25K\u2013<50K": int(((vals >= 25000) & (vals < 50000)).sum()),
+                    "50K\u2013<100K": int(((vals >= 50000) & (vals < 100000)).sum()),
+                    "\u2265100K": int((vals >= 100000).sum()),
+                })
+            else:
+                rows.append({
+                    "Wallets": wallet,
+                    "<25k": int((vals <= 25000).sum()),
+                    "25k+": int(((vals > 25000) & (vals <= 50000)).sum()),
+                    "50k+": int(((vals > 50000) & (vals <= 100000)).sum()),
+                    "100k+": int((vals > 100000).sum()),
+                })
         return self._store_cache(cache_key, pd.DataFrame(rows))
 
 

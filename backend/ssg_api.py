@@ -294,8 +294,8 @@ def _monthly_balances() -> pd.DataFrame:
         mon = LOGIC.build_account_monitoring_dataframe()
     except Exception:  # noqa: BLE001
         mon = None
-    cols = ["_WALLET", "_ACCOUNT", "R. BAL", "A. BAL"]
-    if mon is None or mon.empty or not {"ACCOUNTS", "WALLET", "R. BAL", "A. BAL", "_TYPE"} <= set(mon.columns):
+    cols = ["_WALLET", "_ACCOUNT", "R. BAL", "A. BAL", "CODE", "STATUS", "LIMIT STATUS"]
+    if mon is None or mon.empty or not {"ACCOUNTS", "WALLET", "R. BAL", "A. BAL", "CODE", "STATUS", "LIMIT STATUS", "_TYPE"} <= set(mon.columns):
         return pd.DataFrame(columns=cols)
     mon = mon[mon["_TYPE"].eq("Personal Accounts")]
     out = pd.DataFrame({
@@ -303,6 +303,7 @@ def _monthly_balances() -> pd.DataFrame:
         "_ACCOUNT": mon["ACCOUNTS"].astype(str).str.strip().str.upper(),
         "R. BAL": pd.to_numeric(mon["R. BAL"], errors="coerce"),
         "A. BAL": pd.to_numeric(mon["A. BAL"], errors="coerce"),
+        "CODE": mon["CODE"].astype(object), "STATUS": mon["STATUS"].astype(object), "LIMIT STATUS": mon["LIMIT STATUS"].astype(object),
     })
     return out.drop_duplicates(["_WALLET", "_ACCOUNT"], keep="first")[cols]
 
@@ -310,7 +311,8 @@ def _monthly_balances() -> pd.DataFrame:
 def _monthly_frame(q: str = "", wallet: list[str] = (), view: str = "reached") -> pd.DataFrame:
     from ssg.logic_core import MONTHLY_LIMIT_THRESHOLD, MONTHLY_STATUS
     src = DATA.dataframes.get("Monthly Limit")
-    cols = ["ACCOUNT", "WALLET", "TOTAL DP", "TOTAL WP", "R. BAL", "A. BAL", "MONTHLY LIMIT", "REMAINING", "USED %", "LIMIT STATUS"]
+    cols = ["ACCOUNT", "WALLET", "TOTAL DP", "TOTAL WP", "R. BAL", "A. BAL", "CODE", "STATUS", "LIMIT STATUS",
+            "MONTHLY LIMIT", "REMAINING", "USED %"]
     if src is None or src.empty:
         return pd.DataFrame(columns=cols)
     total = pd.to_numeric(src["Total DP Amount"], errors="coerce").fillna(0.0)
@@ -322,7 +324,8 @@ def _monthly_frame(q: str = "", wallet: list[str] = (), view: str = "reached") -
         "REMAINING": (MONTHLY_LIMIT_THRESHOLD - total).clip(lower=0),
         "USED %": (total / MONTHLY_LIMIT_THRESHOLD * 100).round(1),
     })
-    df["LIMIT STATUS"] = df["TOTAL DP"].map(lambda v: MONTHLY_STATUS if v >= MONTHLY_LIMIT_THRESHOLD else "Within Limit")
+    # internal flag for the "reached only" filter (same DP >= threshold rule Account Monitoring uses); not shown
+    reached_flag = total >= MONTHLY_LIMIT_THRESHOLD
     # balances: match on Bank Code + Account Name; if the bank code differs, fall back to the account name when it is unique
     bal = _monthly_balances()
     keys = pd.DataFrame({"_WALLET": df["WALLET"].astype(str).str.strip().str.upper(),
@@ -330,14 +333,14 @@ def _monthly_frame(q: str = "", wallet: list[str] = (), view: str = "reached") -
     merged = keys.merge(bal, on=["_WALLET", "_ACCOUNT"], how="left")
     merged.index = df.index
     by_name = bal[~bal["_ACCOUNT"].duplicated(keep=False)].set_index("_ACCOUNT")
-    for c in ("R. BAL", "A. BAL"):
+    for c in ("R. BAL", "A. BAL", "CODE", "STATUS", "LIMIT STATUS"):
         miss = merged[c].isna()
         if miss.any():
             merged.loc[miss, c] = keys.loc[miss, "_ACCOUNT"].map(by_name[c])
         df[c] = merged[c]
     df = df[cols]
     if view != "all":
-        df = df[df["LIMIT STATUS"].eq(MONTHLY_STATUS)]
+        df = df[reached_flag.reindex(df.index).fillna(False)]
     if wallet:
         df = df[df["WALLET"].isin(wallet)]
     df = df[F._contains_any_terms(df["ACCOUNT"], q)] if q else df
